@@ -8,6 +8,8 @@
 //     避免多个 goroutine 写同一字段引起数据竞争。
 //   - 整体超时由 Analyze 内部派生的 ctx 控制，三个子任务共享同一 deadline，
 //     超时会让卡死的调用立即用 ctx.Err() 返回，对应通道走 *_error 降级。
+//   - risks 通道在 detector 成功后再按置信度阈值做后置过滤；过滤只发生在 risks
+//     这一份通道内，不影响 summary / suggestions，detector 报错时不过滤。
 package analyzer
 
 import (
@@ -21,10 +23,11 @@ import (
 
 // Analyzer 编排 summary / risks / suggestions 三个 LLM 子任务并发执行。
 type Analyzer struct {
-	summarizer pr.Summarizer
-	detector   pr.RiskDetector
-	generator  pr.SuggestionGenerator
-	timeout    time.Duration
+	summarizer    pr.Summarizer
+	detector      pr.RiskDetector
+	generator     pr.SuggestionGenerator
+	timeout       time.Duration
+	riskThreshold float64
 }
 
 func New(
@@ -32,19 +35,21 @@ func New(
 	detector pr.RiskDetector,
 	generator pr.SuggestionGenerator,
 	timeout time.Duration,
+	riskThreshold float64,
 ) *Analyzer {
 	return &Analyzer{
-		summarizer: summarizer,
-		detector:   detector,
-		generator:  generator,
-		timeout:    timeout,
+		summarizer:    summarizer,
+		detector:      detector,
+		generator:     generator,
+		timeout:       timeout,
+		riskThreshold: riskThreshold,
 	}
 }
 
 // Analyze 并发执行三个子任务，结果与各自的错误装进 ReviewResult。
 //
-// 三个通道相互独立：任一子任务失败只影响自己那块字段，不会取消另外两个；
-// 这保留了 handler 层"single channel failure does not poison the others"的语义。
+// 三个通道相互独立：任一子任务失败只影响自己那块字段，不会取消另外两个。
+// risks 通道在成功后再按 riskThreshold 做后置过滤，RisksFiltered 记录被滤掉条数。
 func (a *Analyzer) Analyze(ctx context.Context, changes *pr.PRChanges) pr.ReviewResult {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
@@ -78,7 +83,7 @@ func (a *Analyzer) Analyze(ctx context.Context, changes *pr.PRChanges) pr.Review
 	wg.Wait()
 
 	result := pr.ReviewResult{Changes: changes}
-	logRef := changes // 用于日志的 owner/repo/number
+	logRef := changes
 
 	if summaryErr != nil {
 		log.Printf("summarize pr %s/%s#%d: %v", logRef.Owner, logRef.Repo, logRef.Number, summaryErr)
@@ -90,7 +95,9 @@ func (a *Analyzer) Analyze(ctx context.Context, changes *pr.PRChanges) pr.Review
 		log.Printf("detect risks pr %s/%s#%d: %v", logRef.Owner, logRef.Repo, logRef.Number, risksErr)
 		result.RisksError = risksErr.Error()
 	} else {
-		result.Risks = risks
+		kept := filterRisksByConfidence(risks, a.riskThreshold)
+		result.Risks = kept
+		result.RisksFiltered = len(risks) - len(kept)
 	}
 	if sugErr != nil {
 		log.Printf("generate suggestions pr %s/%s#%d: %v", logRef.Owner, logRef.Repo, logRef.Number, sugErr)

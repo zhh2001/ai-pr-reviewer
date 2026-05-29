@@ -45,6 +45,7 @@ func TestAnalyze_AllOK(t *testing.T) {
 		okDetector([]pr.Risk{{File: "a.go", Severity: "low"}}),
 		okGenerator([]pr.Suggestion{{File: "a.go", Category: "docs"}}),
 		2*time.Second,
+		0.0, // 现有用例不关心过滤，阈值 0 保留所有 risks
 	)
 	res := a.Analyze(context.Background(), &pr.PRChanges{Owner: "o", Repo: "r", Number: 1})
 	if res.Summary != "ok" {
@@ -67,6 +68,7 @@ func TestAnalyze_OnlySummarizerFails(t *testing.T) {
 		okDetector([]pr.Risk{{File: "a.go"}}),
 		okGenerator([]pr.Suggestion{{File: "a.go"}}),
 		2*time.Second,
+		0.0, // 现有用例不关心过滤，阈值 0 保留所有 risks
 	)
 	res := a.Analyze(context.Background(), &pr.PRChanges{})
 	if res.SummaryError == "" {
@@ -85,6 +87,7 @@ func TestAnalyze_OnlyDetectorFails(t *testing.T) {
 		}),
 		okGenerator([]pr.Suggestion{{File: "a.go"}}),
 		2*time.Second,
+		0.0, // 现有用例不关心过滤，阈值 0 保留所有 risks
 	)
 	res := a.Analyze(context.Background(), &pr.PRChanges{})
 	if res.RisksError == "" {
@@ -103,6 +106,7 @@ func TestAnalyze_OnlyGeneratorFails(t *testing.T) {
 			return nil, errors.New("sug-boom")
 		}),
 		2*time.Second,
+		0.0, // 现有用例不关心过滤，阈值 0 保留所有 risks
 	)
 	res := a.Analyze(context.Background(), &pr.PRChanges{})
 	if res.SuggestionsError == "" {
@@ -138,6 +142,7 @@ func TestAnalyze_RunsConcurrently(t *testing.T) {
 			return []pr.Suggestion{}, nil
 		}),
 		3*time.Second,
+		0.0,
 	)
 
 	done := make(chan pr.ReviewResult, 1)
@@ -155,6 +160,70 @@ func TestAnalyze_RunsConcurrently(t *testing.T) {
 	}
 }
 
+// detector 成功时，risks 按阈值过滤，且 RisksFiltered 记录被滤掉条数；
+// summary / suggestions 不受影响，降级语义保持。
+func TestAnalyze_FiltersRisksByConfidence(t *testing.T) {
+	mixed := []pr.Risk{
+		{File: "a.go", Confidence: 0.9},
+		{File: "b.go", Confidence: 0.4},
+		{File: "c.go", Confidence: 0.5},
+		{File: "d.go", Confidence: 0.1},
+	}
+	a := analyzer.New(
+		okSummarizer("summary stays"),
+		okDetector(mixed),
+		okGenerator([]pr.Suggestion{{File: "z.go", Category: "docs"}}),
+		2*time.Second,
+		0.5,
+	)
+	res := a.Analyze(context.Background(), &pr.PRChanges{Owner: "o", Repo: "r", Number: 1})
+
+	if len(res.Risks) != 2 {
+		t.Errorf("kept = %d, want 2 (>=0.5): %+v", len(res.Risks), res.Risks)
+	}
+	for _, r := range res.Risks {
+		if r.Confidence < 0.5 {
+			t.Errorf("kept risk below threshold: %+v", r)
+		}
+	}
+	if res.RisksFiltered != 2 {
+		t.Errorf("risks_filtered = %d, want 2", res.RisksFiltered)
+	}
+	if res.RisksError != "" {
+		t.Errorf("risks_error should stay empty: %q", res.RisksError)
+	}
+	// 其它两通道不受影响。
+	if res.Summary != "summary stays" {
+		t.Errorf("summary changed: %q", res.Summary)
+	}
+	if len(res.Suggestions) != 1 {
+		t.Errorf("suggestions changed: %+v", res.Suggestions)
+	}
+}
+
+// detector 失败时不应做过滤，RisksFiltered 必须为 0，错误照常走 risks_error。
+func TestAnalyze_DetectorErrorDoesNotFilter(t *testing.T) {
+	a := analyzer.New(
+		okSummarizer("ok"),
+		funcDetector(func(context.Context, *pr.PRChanges) ([]pr.Risk, error) {
+			return nil, errors.New("detector down")
+		}),
+		okGenerator([]pr.Suggestion{}),
+		2*time.Second,
+		0.5,
+	)
+	res := a.Analyze(context.Background(), &pr.PRChanges{})
+	if res.RisksError == "" {
+		t.Errorf("risks_error should be set")
+	}
+	if res.RisksFiltered != 0 {
+		t.Errorf("risks_filtered = %d, want 0 on detector error", res.RisksFiltered)
+	}
+	if len(res.Risks) != 0 {
+		t.Errorf("risks should be empty on error, got %+v", res.Risks)
+	}
+}
+
 // 整体超时会让仍在等的子任务用 ctx.Err() 返回，所有通道走 *_error 降级。
 func TestAnalyze_TimeoutMarksAllChannels(t *testing.T) {
 	block := func(ctx context.Context) error {
@@ -166,6 +235,7 @@ func TestAnalyze_TimeoutMarksAllChannels(t *testing.T) {
 		funcDetector(func(ctx context.Context, _ *pr.PRChanges) ([]pr.Risk, error) { return nil, block(ctx) }),
 		funcGenerator(func(ctx context.Context, _ *pr.PRChanges) ([]pr.Suggestion, error) { return nil, block(ctx) }),
 		50*time.Millisecond,
+		0.0,
 	)
 
 	start := time.Now()

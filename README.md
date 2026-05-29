@@ -34,6 +34,7 @@ AI 辅助的 GitHub PR Review 工具：拉取指定 PR 的代码变更，用 LLM
 - `DEEPSEEK_API_KEY` —— 调 DeepSeek（OpenAI 兼容）用
 - `ADDR` —— 后端监听地址，默认 `:8080`
 - `ANALYZE_TIMEOUT_SECONDS` —— summary/risks/suggestions 三个子任务并发跑的整体超时，默认 90
+- `RISK_CONFIDENCE_THRESHOLD` —— risks 通道的置信度过滤阈值，`[0,1]`，默认 `0.5`；低于此值的风险被剔除以控制误报，越界自动夹紧
 
 > 配置只走环境变量，不要把密钥写进代码或提交进仓库。
 
