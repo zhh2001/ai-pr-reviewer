@@ -2,10 +2,7 @@ package llm
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"strings"
 
 	openai "github.com/sashabaranov/go-openai"
 
@@ -25,12 +22,13 @@ const risksSystemPrompt = `你是一个资深工程师，正在做 PR 风险 rev
     line (int): 行号，无法定位时填 0
     severity (string): "high" | "medium" | "low"
     category (string): "bug" | "security" | "performance" | "maintainability" | "style"
-    description (string): 中文，简洁，落到具体行为或位置
+    description (string): 简体中文，简洁，落到具体行为或位置
     confidence (float): 0~1，对不确定的判断给低分
 
 判断准则：
 - 只报真正值得关注的问题，宁可少报，不要为凑数误报。
-- description 不要"建议加测试"这类泛泛之谈，要指出具体代码层面的隐患。`
+- description 不要"建议加测试"这类泛泛之谈，要指出具体代码层面的隐患。
+- 这是"问题/风险"维度。可读性、命名、补测试等改进性意见不在这里输出。`
 
 func (c *Client) DetectRisks(ctx context.Context, changes *pr.PRChanges) ([]pr.Risk, error) {
 	p := BuildRisksPrompt(changes)
@@ -53,38 +51,7 @@ func (c *Client) DetectRisks(ctx context.Context, changes *pr.PRChanges) ([]pr.R
 	return ParseRisksJSON(resp.Choices[0].Message.Content)
 }
 
-// ParseRisksJSON 解析模型返回的 risks JSON。即便系统提示已禁止 markdown，
-// 模型偶尔仍包 ```json fence，这里做一层兜底剥离。
+// ParseRisksJSON 解析模型返回的 risks JSON。
 func ParseRisksJSON(raw string) ([]pr.Risk, error) {
-	s := stripFences(strings.TrimSpace(raw))
-	var env struct {
-		Risks []pr.Risk `json:"risks"`
-	}
-	if err := json.Unmarshal([]byte(s), &env); err != nil {
-		snippet := s
-		if len(snippet) > 200 {
-			snippet = snippet[:200] + "..."
-		}
-		return nil, fmt.Errorf("parse risks json: %w; got=%q", err, snippet)
-	}
-	if env.Risks == nil {
-		env.Risks = []pr.Risk{}
-	}
-	return env.Risks, nil
-}
-
-// stripFences 去掉首尾 ```（可带 ```json 这种语言标签），其它内容原样保留。
-func stripFences(s string) string {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "```") {
-		return s
-	}
-	if nl := strings.IndexByte(s, '\n'); nl >= 0 {
-		s = s[nl+1:]
-	} else {
-		s = strings.TrimPrefix(s, "```")
-	}
-	s = strings.TrimRight(s, " \n\r\t")
-	s = strings.TrimSuffix(s, "```")
-	return strings.TrimSpace(s)
+	return parseEnvelopedJSON[pr.Risk](raw, "risks")
 }
