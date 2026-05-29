@@ -1,0 +1,181 @@
+package analyzer_test
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/zhh2001/ai-pr-reviewer/backend/internal/analyzer"
+	"github.com/zhh2001/ai-pr-reviewer/backend/internal/pr"
+)
+
+type funcSummarizer func(context.Context, *pr.PRChanges) (string, error)
+
+func (f funcSummarizer) Summarize(ctx context.Context, c *pr.PRChanges) (string, error) {
+	return f(ctx, c)
+}
+
+type funcDetector func(context.Context, *pr.PRChanges) ([]pr.Risk, error)
+
+func (f funcDetector) DetectRisks(ctx context.Context, c *pr.PRChanges) ([]pr.Risk, error) {
+	return f(ctx, c)
+}
+
+type funcGenerator func(context.Context, *pr.PRChanges) ([]pr.Suggestion, error)
+
+func (f funcGenerator) GenerateSuggestions(ctx context.Context, c *pr.PRChanges) ([]pr.Suggestion, error) {
+	return f(ctx, c)
+}
+
+func okSummarizer(s string) funcSummarizer {
+	return func(context.Context, *pr.PRChanges) (string, error) { return s, nil }
+}
+func okDetector(r []pr.Risk) funcDetector {
+	return func(context.Context, *pr.PRChanges) ([]pr.Risk, error) { return r, nil }
+}
+func okGenerator(s []pr.Suggestion) funcGenerator {
+	return func(context.Context, *pr.PRChanges) ([]pr.Suggestion, error) { return s, nil }
+}
+
+func TestAnalyze_AllOK(t *testing.T) {
+	a := analyzer.New(
+		okSummarizer("ok"),
+		okDetector([]pr.Risk{{File: "a.go", Severity: "low"}}),
+		okGenerator([]pr.Suggestion{{File: "a.go", Category: "docs"}}),
+		2*time.Second,
+	)
+	res := a.Analyze(context.Background(), &pr.PRChanges{Owner: "o", Repo: "r", Number: 1})
+	if res.Summary != "ok" {
+		t.Errorf("summary: %q", res.Summary)
+	}
+	if len(res.Risks) != 1 || len(res.Suggestions) != 1 {
+		t.Errorf("risks=%+v suggestions=%+v", res.Risks, res.Suggestions)
+	}
+	if res.SummaryError != "" || res.RisksError != "" || res.SuggestionsError != "" {
+		t.Errorf("no errors expected: %+v", res)
+	}
+}
+
+// 三个 _Error 测试锁住"一个失败不污染另外两个"的并发不变量。
+func TestAnalyze_OnlySummarizerFails(t *testing.T) {
+	a := analyzer.New(
+		funcSummarizer(func(context.Context, *pr.PRChanges) (string, error) {
+			return "", errors.New("sum-boom")
+		}),
+		okDetector([]pr.Risk{{File: "a.go"}}),
+		okGenerator([]pr.Suggestion{{File: "a.go"}}),
+		2*time.Second,
+	)
+	res := a.Analyze(context.Background(), &pr.PRChanges{})
+	if res.SummaryError == "" {
+		t.Errorf("summary_error should be set")
+	}
+	if len(res.Risks) != 1 || len(res.Suggestions) != 1 {
+		t.Errorf("other channels should be untouched: %+v", res)
+	}
+}
+
+func TestAnalyze_OnlyDetectorFails(t *testing.T) {
+	a := analyzer.New(
+		okSummarizer("ok"),
+		funcDetector(func(context.Context, *pr.PRChanges) ([]pr.Risk, error) {
+			return nil, errors.New("risk-boom")
+		}),
+		okGenerator([]pr.Suggestion{{File: "a.go"}}),
+		2*time.Second,
+	)
+	res := a.Analyze(context.Background(), &pr.PRChanges{})
+	if res.RisksError == "" {
+		t.Errorf("risks_error should be set")
+	}
+	if res.Summary != "ok" || len(res.Suggestions) != 1 {
+		t.Errorf("other channels should be untouched: %+v", res)
+	}
+}
+
+func TestAnalyze_OnlyGeneratorFails(t *testing.T) {
+	a := analyzer.New(
+		okSummarizer("ok"),
+		okDetector([]pr.Risk{{File: "a.go"}}),
+		funcGenerator(func(context.Context, *pr.PRChanges) ([]pr.Suggestion, error) {
+			return nil, errors.New("sug-boom")
+		}),
+		2*time.Second,
+	)
+	res := a.Analyze(context.Background(), &pr.PRChanges{})
+	if res.SuggestionsError == "" {
+		t.Errorf("suggestions_error should be set")
+	}
+	if res.Summary != "ok" || len(res.Risks) != 1 {
+		t.Errorf("other channels should be untouched: %+v", res)
+	}
+}
+
+// 验证三任务真的并发，不依赖时间断言（不会因负载抖动而 flaky）：
+// 三个 mock 各自 Done() 一个共享 barrier，然后 Wait() 等其它两个也 Done()。
+// 只有都并发起来 barrier 才能归零；若串行执行，第一个会卡死。
+func TestAnalyze_RunsConcurrently(t *testing.T) {
+	var barrier sync.WaitGroup
+	barrier.Add(3)
+	rendezvous := func() {
+		barrier.Done()
+		barrier.Wait()
+	}
+
+	a := analyzer.New(
+		funcSummarizer(func(context.Context, *pr.PRChanges) (string, error) {
+			rendezvous()
+			return "s", nil
+		}),
+		funcDetector(func(context.Context, *pr.PRChanges) ([]pr.Risk, error) {
+			rendezvous()
+			return []pr.Risk{}, nil
+		}),
+		funcGenerator(func(context.Context, *pr.PRChanges) ([]pr.Suggestion, error) {
+			rendezvous()
+			return []pr.Suggestion{}, nil
+		}),
+		3*time.Second,
+	)
+
+	done := make(chan pr.ReviewResult, 1)
+	go func() {
+		done <- a.Analyze(context.Background(), &pr.PRChanges{})
+	}()
+
+	select {
+	case res := <-done:
+		if res.Summary != "s" {
+			t.Errorf("summary mismatch: %q", res.Summary)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Analyze didn't finish in 2s — tasks ran sequentially, not concurrently")
+	}
+}
+
+// 整体超时会让仍在等的子任务用 ctx.Err() 返回，所有通道走 *_error 降级。
+func TestAnalyze_TimeoutMarksAllChannels(t *testing.T) {
+	block := func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	a := analyzer.New(
+		funcSummarizer(func(ctx context.Context, _ *pr.PRChanges) (string, error) { return "", block(ctx) }),
+		funcDetector(func(ctx context.Context, _ *pr.PRChanges) ([]pr.Risk, error) { return nil, block(ctx) }),
+		funcGenerator(func(ctx context.Context, _ *pr.PRChanges) ([]pr.Suggestion, error) { return nil, block(ctx) }),
+		50*time.Millisecond,
+	)
+
+	start := time.Now()
+	res := a.Analyze(context.Background(), &pr.PRChanges{Owner: "o", Repo: "r", Number: 1})
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Errorf("Analyze took too long: %v — timeout not enforced", elapsed)
+	}
+	if res.SummaryError == "" || res.RisksError == "" || res.SuggestionsError == "" {
+		t.Errorf("all three *_error should be set on timeout: %+v", res)
+	}
+}

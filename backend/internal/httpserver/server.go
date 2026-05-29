@@ -4,29 +4,38 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/zhh2001/ai-pr-reviewer/backend/internal/analyzer"
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/config"
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/github"
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/llm"
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/pr"
 )
 
-// New 用真实的 GitHub Fetcher 和 DeepSeek 客户端装配 handler。
-// 同一个 llm.Client 同时实现 Summarizer / RiskDetector / SuggestionGenerator。
+// New 用真实依赖装配 handler：同一个 llm.Client 同时实现 Summarizer / RiskDetector /
+// SuggestionGenerator，三个子任务在 analyzer 里并发跑。
 func New(cfg config.Config) http.Handler {
 	client := llm.NewClient(cfg.DeepSeekAPIKey)
-	return NewWithDeps(github.NewFetcher(cfg.GitHubToken), client, client, client)
+	a := analyzer.New(client, client, client, cfg.AnalyzeTimeout)
+	return newMux(github.NewFetcher(cfg.GitHubToken), a)
 }
 
-// NewWithDeps 暴露给测试，允许注入 mock 依赖。
+// NewWithDeps 暴露给 handler 测试，允许注入 mock 子任务。
+// 用 config.DefaultAnalyzeTimeout 装配 analyzer，handler 测试不关心超时行为
+// （超时单测在 internal/analyzer 里覆盖）。
 func NewWithDeps(
 	fetcher pr.Fetcher,
 	summarizer pr.Summarizer,
 	detector pr.RiskDetector,
 	generator pr.SuggestionGenerator,
 ) http.Handler {
+	a := analyzer.New(summarizer, detector, generator, config.DefaultAnalyzeTimeout)
+	return newMux(fetcher, a)
+}
+
+func newMux(fetcher pr.Fetcher, a *analyzer.Analyzer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
-	mux.Handle("POST /api/review", reviewHandler(fetcher, summarizer, detector, generator))
+	mux.Handle("POST /api/review", reviewHandler(fetcher, a))
 	return mux
 }
 

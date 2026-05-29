@@ -3,9 +3,9 @@ package httpserver
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 
+	"github.com/zhh2001/ai-pr-reviewer/backend/internal/analyzer"
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/github"
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/pr"
 )
@@ -14,12 +14,7 @@ type reviewRequest struct {
 	PRURL string `json:"pr_url"`
 }
 
-func reviewHandler(
-	fetcher pr.Fetcher,
-	summarizer pr.Summarizer,
-	detector pr.RiskDetector,
-	generator pr.SuggestionGenerator,
-) http.HandlerFunc {
+func reviewHandler(fetcher pr.Fetcher, a *analyzer.Analyzer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req reviewRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -40,33 +35,6 @@ func reviewHandler(
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("fetch pr: %v", err))
 			return
 		}
-
-		result := pr.ReviewResult{Changes: changes}
-
-		summary, err := summarizer.Summarize(r.Context(), changes)
-		if err != nil {
-			log.Printf("summarize pr %s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err)
-			result.SummaryError = err.Error()
-		} else {
-			result.Summary = summary
-		}
-
-		risks, err := detector.DetectRisks(r.Context(), changes)
-		if err != nil {
-			log.Printf("detect risks pr %s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err)
-			result.RisksError = err.Error()
-		} else {
-			result.Risks = risks
-		}
-
-		suggestions, err := generator.GenerateSuggestions(r.Context(), changes)
-		if err != nil {
-			log.Printf("generate suggestions pr %s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err)
-			result.SuggestionsError = err.Error()
-		} else {
-			result.Suggestions = suggestions
-		}
-
-		writeJSON(w, http.StatusOK, result)
+		writeJSON(w, http.StatusOK, a.Analyze(r.Context(), changes))
 	}
 }
