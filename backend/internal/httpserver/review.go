@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -12,6 +13,25 @@ import (
 
 type reviewRequest struct {
 	PRURL string `json:"pr_url"`
+}
+
+// writeFetchError 把 github.FetchError 按 Kind 精确映射成 HTTP 状态：
+//   - KindNotFound    → 404，明确告诉用户"不存在或无权访问"
+//   - KindRateLimited → 429，提示稍后重试
+//   - 其它（含未分类） → 502，保留上游原始消息便于排查
+func writeFetchError(w http.ResponseWriter, err error) {
+	var fe *github.FetchError
+	if errors.As(err, &fe) {
+		switch fe.Kind {
+		case github.KindNotFound:
+			writeError(w, http.StatusNotFound, "PR 不存在或无权访问（GitHub 返回 404）")
+			return
+		case github.KindRateLimited:
+			writeError(w, http.StatusTooManyRequests, "GitHub 限流，请稍后重试")
+			return
+		}
+	}
+	writeError(w, http.StatusBadGateway, fmt.Sprintf("fetch pr: %v", err))
 }
 
 func reviewHandler(fetcher pr.Fetcher, a *analyzer.Analyzer) http.HandlerFunc {
@@ -32,7 +52,7 @@ func reviewHandler(fetcher pr.Fetcher, a *analyzer.Analyzer) http.HandlerFunc {
 		}
 		changes, err := fetcher.Fetch(r.Context(), ref)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("fetch pr: %v", err))
+			writeFetchError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, a.Analyze(r.Context(), changes))

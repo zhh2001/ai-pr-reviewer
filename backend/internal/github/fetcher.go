@@ -24,7 +24,7 @@ func NewFetcher(token string) *Fetcher {
 func (f *Fetcher) Fetch(ctx context.Context, ref pr.Ref) (*pr.PRChanges, error) {
 	p, _, err := f.api.PullRequests.Get(ctx, ref.Owner, ref.Repo, ref.Number)
 	if err != nil {
-		return nil, err
+		return nil, classifyFetchError(err)
 	}
 	files, err := f.listAllFiles(ctx, ref)
 	if err != nil {
@@ -39,7 +39,7 @@ func (f *Fetcher) listAllFiles(ctx context.Context, ref pr.Ref) ([]*gh.CommitFil
 	for {
 		batch, resp, err := f.api.PullRequests.ListFiles(ctx, ref.Owner, ref.Repo, ref.Number, opt)
 		if err != nil {
-			return nil, err
+			return nil, classifyFetchError(err)
 		}
 		all = append(all, batch...)
 		if resp.NextPage == 0 {
