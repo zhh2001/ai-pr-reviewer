@@ -31,7 +31,7 @@ type FileChange struct {
 	Patch     string `json:"patch"`
 }
 
-// Risk 是单条 review 风险点。Line 无法定位时为 0。
+// Risk 是一处确切的问题代码（bug / security / performance / 维护性等），是阻断性的。
 type Risk struct {
 	File        string  `json:"file"`
 	Line        int     `json:"line"`
@@ -41,14 +41,24 @@ type Risk struct {
 	Confidence  float64 `json:"confidence"`
 }
 
+// Suggestion 是一条非阻断的改进建议（可读性、命名、补测试、结构、文档等），
+// 和 Risk 的语义维度不同：Risk 说"这里有问题"，Suggestion 说"这里可以更好"。
+type Suggestion struct {
+	File       string `json:"file"`
+	Line       int    `json:"line"`
+	Category   string `json:"category"`
+	Suggestion string `json:"suggestion"`
+}
+
 // ReviewResult 是 /api/review 的返回信封。
-// 之后做风险建议时往这里加字段。
 type ReviewResult struct {
-	Changes      *PRChanges `json:"changes"`
-	Summary      string     `json:"summary,omitempty"`
-	SummaryError string     `json:"summary_error,omitempty"`
-	Risks        []Risk     `json:"risks,omitempty"`
-	RisksError   string     `json:"risks_error,omitempty"`
+	Changes          *PRChanges   `json:"changes"`
+	Summary          string       `json:"summary,omitempty"`
+	SummaryError     string       `json:"summary_error,omitempty"`
+	Risks            []Risk       `json:"risks,omitempty"`
+	RisksError       string       `json:"risks_error,omitempty"`
+	Suggestions      []Suggestion `json:"suggestions,omitempty"`
+	SuggestionsError string       `json:"suggestions_error,omitempty"`
 }
 
 // Fetcher 拉取 PR 变更。具体实现见 internal/github。
@@ -64,4 +74,9 @@ type Summarizer interface {
 // RiskDetector 对 PR 变更产出结构化风险点。具体实现见 internal/llm。
 type RiskDetector interface {
 	DetectRisks(ctx context.Context, changes *PRChanges) ([]Risk, error)
+}
+
+// SuggestionGenerator 对 PR 变更产出结构化改进建议。具体实现见 internal/llm。
+type SuggestionGenerator interface {
+	GenerateSuggestions(ctx context.Context, changes *PRChanges) ([]Suggestion, error)
 }

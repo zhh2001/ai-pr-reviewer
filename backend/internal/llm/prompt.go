@@ -11,9 +11,12 @@ import (
 //   - Summary 只需把改动说清，32KB 够用。
 //   - Risks 需要更完整的 patch 上下文以精确定位行号、判断危险代码，
 //     截断越激进越容易漏报或误报，预算适当放大。
+//   - Suggestions 是增强性建议，和 summary 同级即可——再多上下文也不会显著提升
+//     "可读性 / 命名 / 补测试"这种判断的质量。
 const (
-	MaxSummaryPromptBytes = 32 * 1024
-	MaxRisksPromptBytes   = 48 * 1024
+	MaxSummaryPromptBytes     = 32 * 1024
+	MaxRisksPromptBytes       = 48 * 1024
+	MaxSuggestionsPromptBytes = 32 * 1024
 )
 
 const truncatedMarker = "\n... [truncated]"
@@ -40,6 +43,15 @@ func BuildRisksPrompt(c *pr.PRChanges) Prompt {
 
 func buildRisksPromptWithBudget(c *pr.PRChanges, budget int) Prompt {
 	return Prompt{System: risksSystemPrompt, User: renderContext(c, budget)}
+}
+
+// BuildSuggestionsPrompt 把 PRChanges 组织成改进建议用的 prompt。
+func BuildSuggestionsPrompt(c *pr.PRChanges) Prompt {
+	return buildSuggestionsPromptWithBudget(c, MaxSuggestionsPromptBytes)
+}
+
+func buildSuggestionsPromptWithBudget(c *pr.PRChanges, budget int) Prompt {
+	return Prompt{System: suggestionsSystemPrompt, User: renderContext(c, budget)}
 }
 
 // renderContext 渲染 PR 上下文（标题、描述、文件列表、各文件 patch）成一段文本，

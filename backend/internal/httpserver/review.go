@@ -14,7 +14,12 @@ type reviewRequest struct {
 	PRURL string `json:"pr_url"`
 }
 
-func reviewHandler(fetcher pr.Fetcher, summarizer pr.Summarizer, detector pr.RiskDetector) http.HandlerFunc {
+func reviewHandler(
+	fetcher pr.Fetcher,
+	summarizer pr.Summarizer,
+	detector pr.RiskDetector,
+	generator pr.SuggestionGenerator,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req reviewRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -52,6 +57,14 @@ func reviewHandler(fetcher pr.Fetcher, summarizer pr.Summarizer, detector pr.Ris
 			result.RisksError = err.Error()
 		} else {
 			result.Risks = risks
+		}
+
+		suggestions, err := generator.GenerateSuggestions(r.Context(), changes)
+		if err != nil {
+			log.Printf("generate suggestions pr %s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err)
+			result.SuggestionsError = err.Error()
+		} else {
+			result.Suggestions = suggestions
 		}
 
 		writeJSON(w, http.StatusOK, result)
