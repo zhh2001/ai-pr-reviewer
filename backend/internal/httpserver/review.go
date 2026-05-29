@@ -14,7 +14,7 @@ type reviewRequest struct {
 	PRURL string `json:"pr_url"`
 }
 
-func reviewHandler(fetcher pr.Fetcher, summarizer pr.Summarizer) http.HandlerFunc {
+func reviewHandler(fetcher pr.Fetcher, summarizer pr.Summarizer, detector pr.RiskDetector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req reviewRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -37,12 +37,21 @@ func reviewHandler(fetcher pr.Fetcher, summarizer pr.Summarizer) http.HandlerFun
 		}
 
 		result := pr.ReviewResult{Changes: changes}
+
 		summary, err := summarizer.Summarize(r.Context(), changes)
 		if err != nil {
 			log.Printf("summarize pr %s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err)
 			result.SummaryError = err.Error()
 		} else {
 			result.Summary = summary
+		}
+
+		risks, err := detector.DetectRisks(r.Context(), changes)
+		if err != nil {
+			log.Printf("detect risks pr %s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err)
+			result.RisksError = err.Error()
+		} else {
+			result.Risks = risks
 		}
 
 		writeJSON(w, http.StatusOK, result)
