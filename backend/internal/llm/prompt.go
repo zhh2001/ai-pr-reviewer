@@ -7,18 +7,16 @@ import (
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/pr"
 )
 
-// MaxPromptBytes 总结调用的输入字节预算。超出后按文件均分预算截断各自的 patch。
-// 32KB 对 deepseek-v4-flash 已经够 review 一个中等 PR，又不至于把上下文窗口挤爆。
-const MaxPromptBytes = 32 * 1024
+// 不同任务给不同输入预算：
+//   - Summary 只需把改动说清，32KB 够用。
+//   - Risks 需要更完整的 patch 上下文以精确定位行号、判断危险代码，
+//     截断越激进越容易漏报或误报，预算适当放大。
+const (
+	MaxSummaryPromptBytes = 32 * 1024
+	MaxRisksPromptBytes   = 48 * 1024
+)
 
 const truncatedMarker = "\n... [truncated]"
-
-const summarySystemPrompt = `你是一个资深工程师，正在做 code review 总结。要求：
-- 用中文输出 5-10 句以内
-- 直接说这个 PR 改了什么、为什么改、影响面
-- 不要"本 PR 旨在……" / "综上所述" 这类套话，不要 emoji
-- 不要逐个复述文件名，按主题归纳
-- 只基于给到的 diff 说事，不要编造背景`
 
 // Prompt 是一次 chat completion 的 system+user 双消息内容。
 type Prompt struct {
@@ -27,12 +25,26 @@ type Prompt struct {
 }
 
 // BuildSummaryPrompt 把 PRChanges 组织成总结用的 prompt。
-// 总输入受 MaxPromptBytes 控制。
 func BuildSummaryPrompt(c *pr.PRChanges) Prompt {
-	return buildSummaryPromptWithBudget(c, MaxPromptBytes)
+	return buildSummaryPromptWithBudget(c, MaxSummaryPromptBytes)
 }
 
 func buildSummaryPromptWithBudget(c *pr.PRChanges, budget int) Prompt {
+	return Prompt{System: summarySystemPrompt, User: renderContext(c, budget)}
+}
+
+// BuildRisksPrompt 把 PRChanges 组织成风险识别用的 prompt。
+func BuildRisksPrompt(c *pr.PRChanges) Prompt {
+	return buildRisksPromptWithBudget(c, MaxRisksPromptBytes)
+}
+
+func buildRisksPromptWithBudget(c *pr.PRChanges, budget int) Prompt {
+	return Prompt{System: risksSystemPrompt, User: renderContext(c, budget)}
+}
+
+// renderContext 渲染 PR 上下文（标题、描述、文件列表、各文件 patch）成一段文本，
+// 总输入受 budget 控制：剩余预算均分给各文件 patch，超出按字节截断并标注 [truncated]。
+func renderContext(c *pr.PRChanges, budget int) string {
 	var head strings.Builder
 	fmt.Fprintf(&head, "PR: %s/%s#%d\n", c.Owner, c.Repo, c.Number)
 	fmt.Fprintf(&head, "Title: %s\n", c.Title)
@@ -59,11 +71,10 @@ func buildSummaryPromptWithBudget(c *pr.PRChanges, budget int) Prompt {
 		body.WriteString(truncatePatch(f.Patch, perFile))
 		body.WriteString("\n")
 	}
-	return Prompt{System: summarySystemPrompt, User: body.String()}
+	return body.String()
 }
 
 // truncatePatch 把 patch 限制在 max 字节内，超出则截断并附 [truncated] 标记。
-// 返回值长度 <= max（除非 max < len(marker)，此时返回 marker 本身）。
 func truncatePatch(patch string, max int) string {
 	if len(patch) <= max {
 		return patch
