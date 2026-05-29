@@ -1,0 +1,16 @@
+# Go
+/backend/bin/
+*.exe
+
+# Env & secrets
+.env
+*.local
+
+# Node / Vite
+/frontend/node_modules/
+/frontend/dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
