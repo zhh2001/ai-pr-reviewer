@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zhh2001/ai-pr-reviewer/backend/internal/github"
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/pr"
 )
 
@@ -264,6 +265,43 @@ func TestReview_FetcherError(t *testing.T) {
 	body := assertErrorBody(t, rec.Body)
 	if !strings.Contains(body, "boom") {
 		t.Errorf("error body missing upstream message: %s", body)
+	}
+}
+
+func TestReview_FetcherNotFound(t *testing.T) {
+	mf := &mockFetcher{err: &github.FetchError{Kind: github.KindNotFound, Status: 404, Msg: "Not Found"}}
+	rec := doReview(t, mf, &mockSummarizer{}, &mockDetector{}, &mockGenerator{}, `{"pr_url":"foo/bar#1"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body := assertErrorBody(t, rec.Body)
+	if !strings.Contains(body, "不存在") {
+		t.Errorf("404 body should explain not-found: %s", body)
+	}
+}
+
+func TestReview_FetcherRateLimited(t *testing.T) {
+	mf := &mockFetcher{err: &github.FetchError{Kind: github.KindRateLimited, Status: 403, Msg: "rate limit"}}
+	rec := doReview(t, mf, &mockSummarizer{}, &mockDetector{}, &mockGenerator{}, `{"pr_url":"foo/bar#1"}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body := assertErrorBody(t, rec.Body)
+	if !strings.Contains(body, "限流") {
+		t.Errorf("429 body should mention rate limit: %s", body)
+	}
+}
+
+func TestReview_FetcherUpstreamFallthrough(t *testing.T) {
+	// 上游 500 不归 404/429 任何具体类别，应继续走 502 兜底。
+	mf := &mockFetcher{err: &github.FetchError{Kind: github.KindUpstream, Status: 500, Msg: "Internal"}}
+	rec := doReview(t, mf, &mockSummarizer{}, &mockDetector{}, &mockGenerator{}, `{"pr_url":"foo/bar#1"}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body := assertErrorBody(t, rec.Body)
+	if !strings.Contains(body, "Internal") {
+		t.Errorf("502 body should include upstream message: %s", body)
 	}
 }
 
