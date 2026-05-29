@@ -57,6 +57,9 @@ type ReviewResult struct {
 	SummaryError     string       `json:"summary_error,omitempty"`
 	Risks            []Risk       `json:"risks,omitempty"`
 	RisksError       string       `json:"risks_error,omitempty"`
+	// RisksFiltered 是被置信度阈值过滤掉的风险条数。仅在 detector 成功且确有项被
+	// 过滤时 > 0；用 omitempty 避免在错误路径或无过滤时输出冗余的 0。
+	RisksFiltered int `json:"risks_filtered,omitempty"`
 	Suggestions      []Suggestion `json:"suggestions,omitempty"`
 	SuggestionsError string       `json:"suggestions_error,omitempty"`
 }

@@ -15,7 +15,7 @@ import (
 // SuggestionGenerator，三个子任务在 analyzer 里并发跑。
 func New(cfg config.Config) http.Handler {
 	client := llm.NewClient(cfg.DeepSeekAPIKey)
-	a := analyzer.New(client, client, client, cfg.AnalyzeTimeout)
+	a := analyzer.New(client, client, client, cfg.AnalyzeTimeout, cfg.RiskConfidenceThreshold)
 	return newMux(github.NewFetcher(cfg.GitHubToken), a)
 }
 
@@ -28,7 +28,7 @@ func NewWithDeps(
 	detector pr.RiskDetector,
 	generator pr.SuggestionGenerator,
 ) http.Handler {
-	a := analyzer.New(summarizer, detector, generator, config.DefaultAnalyzeTimeout)
+	a := analyzer.New(summarizer, detector, generator, config.DefaultAnalyzeTimeout, config.DefaultRiskConfidenceThreshold)
 	return newMux(fetcher, a)
 }
 

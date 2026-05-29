@@ -127,7 +127,7 @@ func TestReview_GeneratorError(t *testing.T) {
 	changes := &pr.PRChanges{Owner: "foo", Repo: "bar", Number: 1, Title: "x"}
 	mf := &mockFetcher{res: changes}
 	ms := &mockSummarizer{res: "summary ok"}
-	md := &mockDetector{res: []pr.Risk{{File: "a.go", Severity: "low"}}}
+	md := &mockDetector{res: []pr.Risk{{File: "a.go", Severity: "low", Confidence: 0.9}}}
 	mg := &mockGenerator{err: errors.New("deepseek 504")}
 
 	rec := doReview(t, mf, ms, md, mg, `{"pr_url":"foo/bar#1"}`)
@@ -194,7 +194,7 @@ func TestReview_SummarizerError(t *testing.T) {
 	changes := &pr.PRChanges{Owner: "foo", Repo: "bar", Number: 1, Title: "x"}
 	mf := &mockFetcher{res: changes}
 	ms := &mockSummarizer{err: errors.New("deepseek 502")}
-	md := &mockDetector{res: []pr.Risk{{File: "a.go", Severity: "low"}}}
+	md := &mockDetector{res: []pr.Risk{{File: "a.go", Severity: "low", Confidence: 0.9}}}
 	mg := &mockGenerator{res: []pr.Suggestion{{File: "a.go", Category: "docs"}}}
 
 	rec := doReview(t, mf, ms, md, mg, `{"pr_url":"foo/bar#1"}`)
