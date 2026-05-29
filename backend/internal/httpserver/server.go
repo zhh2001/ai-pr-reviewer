@@ -6,19 +6,23 @@ import (
 
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/config"
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/github"
+	"github.com/zhh2001/ai-pr-reviewer/backend/internal/llm"
 	"github.com/zhh2001/ai-pr-reviewer/backend/internal/pr"
 )
 
-// New 用真实的 GitHub Fetcher 装配 handler。
+// New 用真实的 GitHub Fetcher 和 DeepSeek Summarizer 装配 handler。
 func New(cfg config.Config) http.Handler {
-	return NewWithFetcher(github.NewFetcher(cfg.GitHubToken))
+	return NewWithDeps(
+		github.NewFetcher(cfg.GitHubToken),
+		llm.NewClient(cfg.DeepSeekAPIKey),
+	)
 }
 
-// NewWithFetcher 暴露给测试，允许注入 mock Fetcher。
-func NewWithFetcher(fetcher pr.Fetcher) http.Handler {
+// NewWithDeps 暴露给测试，允许注入 mock 依赖。
+func NewWithDeps(fetcher pr.Fetcher, summarizer pr.Summarizer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
-	mux.Handle("POST /api/review", reviewHandler(fetcher))
+	mux.Handle("POST /api/review", reviewHandler(fetcher, summarizer))
 	return mux
 }
 

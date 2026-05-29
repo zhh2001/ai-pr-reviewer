@@ -24,9 +24,20 @@ func (m *mockFetcher) Fetch(_ context.Context, ref pr.Ref) (*pr.PRChanges, error
 	return m.res, m.err
 }
 
-func doReview(t *testing.T, fetcher pr.Fetcher, body string) *httptest.ResponseRecorder {
+type mockSummarizer struct {
+	gotChanges *pr.PRChanges
+	res        string
+	err        error
+}
+
+func (m *mockSummarizer) Summarize(_ context.Context, c *pr.PRChanges) (string, error) {
+	m.gotChanges = c
+	return m.res, m.err
+}
+
+func doReview(t *testing.T, fetcher pr.Fetcher, summarizer pr.Summarizer, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	h := NewWithFetcher(fetcher)
+	h := NewWithDeps(fetcher, summarizer)
 	req := httptest.NewRequest(http.MethodPost, "/api/review", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -35,15 +46,16 @@ func doReview(t *testing.T, fetcher pr.Fetcher, body string) *httptest.ResponseR
 }
 
 func TestReview_OK(t *testing.T) {
-	want := &pr.PRChanges{
+	changes := &pr.PRChanges{
 		Owner: "foo", Repo: "bar", Number: 7,
 		Title: "hi", Author: "alice",
 		BaseRef: "main", HeadRef: "feat",
 		Files: []pr.FileChange{{Path: "a.go", Status: "added", Additions: 1, Patch: "@@"}},
 	}
-	mf := &mockFetcher{res: want}
+	mf := &mockFetcher{res: changes}
+	ms := &mockSummarizer{res: "改了 hello 函数的返回类型，影响 a.go。"}
 
-	rec := doReview(t, mf, `{"pr_url":"https://github.com/foo/bar/pull/7"}`)
+	rec := doReview(t, mf, ms, `{"pr_url":"https://github.com/foo/bar/pull/7"}`)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -51,21 +63,55 @@ func TestReview_OK(t *testing.T) {
 	if mf.gotRef != (pr.Ref{Owner: "foo", Repo: "bar", Number: 7}) {
 		t.Errorf("fetcher got ref %+v", mf.gotRef)
 	}
-	var got pr.PRChanges
+	if ms.gotChanges != changes {
+		t.Errorf("summarizer should receive the same changes pointer")
+	}
+
+	var got pr.ReviewResult
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode body: %v; raw=%s", err, rec.Body.String())
 	}
-	if got.Owner != want.Owner || got.Number != want.Number || got.Title != want.Title {
-		t.Errorf("body mismatch: got %+v", got)
+	if got.Changes == nil || got.Changes.Number != 7 {
+		t.Errorf("changes envelope missing: %+v", got)
 	}
-	if len(got.Files) != 1 || got.Files[0] != want.Files[0] {
-		t.Errorf("files mismatch: %+v", got.Files)
+	if got.Summary != "改了 hello 函数的返回类型，影响 a.go。" {
+		t.Errorf("summary mismatch: %q", got.Summary)
+	}
+	if got.SummaryError != "" {
+		t.Errorf("summary_error should be empty: %q", got.SummaryError)
+	}
+}
+
+func TestReview_SummarizerError(t *testing.T) {
+	changes := &pr.PRChanges{Owner: "foo", Repo: "bar", Number: 1, Title: "x"}
+	mf := &mockFetcher{res: changes}
+	ms := &mockSummarizer{err: errors.New("deepseek 502")}
+
+	rec := doReview(t, mf, ms, `{"pr_url":"foo/bar#1"}`)
+
+	// 总结失败不能让整个请求失败。
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got pr.ReviewResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode body: %v; raw=%s", err, rec.Body.String())
+	}
+	if got.Changes == nil || got.Changes.Title != "x" {
+		t.Errorf("changes still required when summary fails: %+v", got)
+	}
+	if got.Summary != "" {
+		t.Errorf("summary should be empty on error, got %q", got.Summary)
+	}
+	if !strings.Contains(got.SummaryError, "deepseek 502") {
+		t.Errorf("summary_error missing upstream: %q", got.SummaryError)
 	}
 }
 
 func TestReview_ShorthandAccepted(t *testing.T) {
 	mf := &mockFetcher{res: &pr.PRChanges{}}
-	rec := doReview(t, mf, `{"pr_url":"foo/bar#42"}`)
+	ms := &mockSummarizer{res: "ok"}
+	rec := doReview(t, mf, ms, `{"pr_url":"foo/bar#42"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -75,7 +121,7 @@ func TestReview_ShorthandAccepted(t *testing.T) {
 }
 
 func TestReview_InvalidJSON(t *testing.T) {
-	rec := doReview(t, &mockFetcher{}, `not-json`)
+	rec := doReview(t, &mockFetcher{}, &mockSummarizer{}, `not-json`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -83,7 +129,7 @@ func TestReview_InvalidJSON(t *testing.T) {
 }
 
 func TestReview_MissingURL(t *testing.T) {
-	rec := doReview(t, &mockFetcher{}, `{}`)
+	rec := doReview(t, &mockFetcher{}, &mockSummarizer{}, `{}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -91,7 +137,7 @@ func TestReview_MissingURL(t *testing.T) {
 }
 
 func TestReview_InvalidPRURL(t *testing.T) {
-	rec := doReview(t, &mockFetcher{}, `{"pr_url":"not a url"}`)
+	rec := doReview(t, &mockFetcher{}, &mockSummarizer{}, `{"pr_url":"not a url"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -100,7 +146,7 @@ func TestReview_InvalidPRURL(t *testing.T) {
 
 func TestReview_FetcherError(t *testing.T) {
 	mf := &mockFetcher{err: errors.New("boom")}
-	rec := doReview(t, mf, `{"pr_url":"foo/bar#1"}`)
+	rec := doReview(t, mf, &mockSummarizer{}, `{"pr_url":"foo/bar#1"}`)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -111,7 +157,7 @@ func TestReview_FetcherError(t *testing.T) {
 }
 
 func TestHealthz(t *testing.T) {
-	h := NewWithFetcher(&mockFetcher{})
+	h := NewWithDeps(&mockFetcher{}, &mockSummarizer{})
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

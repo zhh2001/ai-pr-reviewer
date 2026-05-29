@@ -31,7 +31,20 @@ type FileChange struct {
 	Patch     string `json:"patch"`
 }
 
+// ReviewResult 是 /api/review 的返回信封。
+// 之后做风险点 / 建议时往这里加字段。
+type ReviewResult struct {
+	Changes      *PRChanges `json:"changes"`
+	Summary      string     `json:"summary,omitempty"`
+	SummaryError string     `json:"summary_error,omitempty"`
+}
+
 // Fetcher 拉取 PR 变更。具体实现见 internal/github。
 type Fetcher interface {
 	Fetch(ctx context.Context, ref Ref) (*PRChanges, error)
+}
+
+// Summarizer 对 PR 变更产出自然语言总结。具体实现见 internal/llm。
+type Summarizer interface {
+	Summarize(ctx context.Context, changes *PRChanges) (string, error)
 }
