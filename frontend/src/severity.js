@@ -26,3 +26,18 @@ export function sortBySeverity(risks) {
     (a, b) => severityRank(a?.severity) - severityRank(b?.severity),
   )
 }
+
+// severityCounts: 统计每个 severity 的条数；用于结果区顶部那条分布微条。
+export function severityCounts(risks) {
+  const out = { high: 0, medium: 0, low: 0, unknown: 0 }
+  if (!risks || !risks.length) return out
+  for (const r of risks) {
+    const key = normalize(r?.severity)
+    if (key === 'high' || key === 'medium' || key === 'low') {
+      out[key]++
+    } else {
+      out.unknown++
+    }
+  }
+  return out
+}

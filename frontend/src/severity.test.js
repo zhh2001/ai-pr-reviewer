@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { severityRank, severityClass, sortBySeverity } from './severity.js'
+import { severityRank, severityClass, sortBySeverity, severityCounts } from './severity.js'
 
 describe('severityRank', () => {
   it('orders high < medium < low', () => {
@@ -61,5 +61,29 @@ describe('sortBySeverity', () => {
   it('handles nullish input', () => {
     expect(sortBySeverity(null)).toEqual([])
     expect(sortBySeverity(undefined)).toEqual([])
+  })
+})
+
+describe('severityCounts', () => {
+  it('counts each known level', () => {
+    expect(
+      severityCounts([
+        { severity: 'high' },
+        { severity: 'low' },
+        { severity: 'medium' },
+        { severity: 'HIGH' },
+      ]),
+    ).toEqual({ high: 2, medium: 1, low: 1, unknown: 0 })
+  })
+  it('puts unknown values into the unknown bucket', () => {
+    expect(severityCounts([{ severity: 'critical' }, { severity: '' }])).toEqual({
+      high: 0, medium: 0, low: 0, unknown: 2,
+    })
+  })
+  it('handles empty / nullish input', () => {
+    const empty = { high: 0, medium: 0, low: 0, unknown: 0 }
+    expect(severityCounts([])).toEqual(empty)
+    expect(severityCounts(null)).toEqual(empty)
+    expect(severityCounts(undefined)).toEqual(empty)
   })
 })
