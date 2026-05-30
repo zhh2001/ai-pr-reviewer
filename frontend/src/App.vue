@@ -3,6 +3,9 @@ import { ref } from 'vue'
 import ChangesOverview from './components/ChangesOverview.vue'
 import RisksSection from './components/RisksSection.vue'
 import SuggestionsSection from './components/SuggestionsSection.vue'
+import SummaryView from './components/SummaryView.vue'
+import ResultSummary from './components/ResultSummary.vue'
+import Skeleton from './components/Skeleton.vue'
 
 const prUrl = ref('')
 const loading = ref(false)
@@ -46,73 +49,80 @@ async function extractError(res) {
 </script>
 
 <template>
-  <main class="app">
-    <header class="header">
-      <h1>ai-pr-reviewer</h1>
-      <form class="pr-form" @submit.prevent="review">
-        <input
-          v-model="prUrl"
-          class="url-input mono"
-          placeholder="owner/repo#123  or  https://github.com/owner/repo/pull/123"
-          :disabled="loading"
-        />
-        <button
-          type="submit"
-          class="btn"
-          :disabled="loading || !prUrl.trim()"
-        >
-          {{ loading ? 'Reviewing…' : 'Review' }}
-        </button>
-      </form>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <span class="brand-name">ai-pr-reviewer</span>
+          <span class="brand-tag">Summary · Risks · Suggestions</span>
+        </div>
+        <form class="pr-form" @submit.prevent="review">
+          <input
+            v-model="prUrl"
+            class="url-input mono"
+            placeholder="owner/repo#123  or  https://github.com/owner/repo/pull/123"
+            :disabled="loading"
+            spellcheck="false"
+            autocapitalize="off"
+            autocorrect="off"
+          />
+          <button
+            type="submit"
+            class="btn primary"
+            :disabled="loading || !prUrl.trim()"
+          >
+            <span class="dot" v-if="loading" aria-hidden="true"></span>
+            {{ loading ? 'Reviewing' : 'Review' }}
+          </button>
+        </form>
+      </div>
     </header>
 
-    <div v-if="loading" class="loading">
-      <span class="dot" aria-hidden="true"></span>
-      <span>Fetching diff, running summary / risks / suggestions in parallel…</span>
-    </div>
+    <main class="app">
+      <div v-if="topError" class="banner error">{{ topError }}</div>
 
-    <div v-if="topError" class="banner error">{{ topError }}</div>
+      <Skeleton v-if="loading" />
 
-    <section v-if="result && result.changes" class="result">
-      <ChangesOverview :changes="result.changes" />
-
-      <section class="block">
-        <h2>Summary</h2>
-        <p v-if="result.summary" class="summary-text">{{ result.summary }}</p>
-        <p v-else-if="result.summary_error" class="section-error">
-          本节分析暂时失败：{{ result.summary_error }}
-        </p>
-        <p v-else class="muted">No summary returned.</p>
+      <section v-else-if="result && result.changes" class="result">
+        <ResultSummary :result="result" />
+        <ChangesOverview :changes="result.changes" />
+        <SummaryView
+          :summary="result.summary || ''"
+          :summary-error="result.summary_error || ''"
+        />
+        <RisksSection
+          :risks="result.risks || []"
+          :risks-error="result.risks_error || ''"
+          :risks-filtered="result.risks_filtered || 0"
+          :changes="result.changes"
+        />
+        <SuggestionsSection
+          :suggestions="result.suggestions || []"
+          :suggestions-error="result.suggestions_error || ''"
+          :changes="result.changes"
+        />
       </section>
 
-      <RisksSection
-        :risks="result.risks || []"
-        :risks-error="result.risks_error || ''"
-        :risks-filtered="result.risks_filtered || 0"
-      />
-
-      <SuggestionsSection
-        :suggestions="result.suggestions || []"
-        :suggestions-error="result.suggestions_error || ''"
-      />
-    </section>
-  </main>
+      <div v-else-if="!loading && !topError" class="placeholder">
+        <p class="placeholder-title">No review yet.</p>
+        <p class="placeholder-hint">
+          Paste a public GitHub PR link or <span class="mono">owner/repo#n</span> shorthand above
+          and press <kbd>Review</kbd>.
+        </p>
+      </div>
+    </main>
+  </div>
 </template>
 
 <style>
 :root {
   --bg: #ffffff;
+  --bg-subtle: #f6f8fa;
   --fg: #1f2328;
   --fg-muted: #57606a;
   --border: #d0d7de;
-  --border-soft: #eaeef2;
+  --border-soft: #e1e4e8;
   --accent: #0969da;
-  --sev-high-bg: #ffebe9;
-  --sev-high-fg: #82071e;
-  --sev-medium-bg: #fff8c5;
-  --sev-medium-fg: #7d4e00;
-  --sev-low-bg: #ddf4ff;
-  --sev-low-fg: #0550ae;
   --error-bg: #ffebe9;
   --error-fg: #82071e;
   --error-border: #ffcecb;
@@ -120,116 +130,136 @@ async function extractError(res) {
   --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
-* {
-  box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
-html,
-body {
+html, body {
   margin: 0;
   padding: 0;
+  background: var(--bg);
 }
-
 body {
   font-family: var(--sans);
-  background: var(--bg);
   color: var(--fg);
   font-size: 14px;
   line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
-.mono {
-  font-family: var(--mono);
-}
+.mono { font-family: var(--mono); }
 
-.app {
-  max-width: 960px;
+.app-shell { min-height: 100vh; }
+
+/* ── Topbar ────────────────────────────────────────────────── */
+
+.topbar {
+  border-bottom: 1px solid var(--border-soft);
+  background: #ffffff;
+}
+.topbar-inner {
+  max-width: 1000px;
   margin: 0 auto;
-  padding: 24px 20px 80px;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
 }
-
-.header h1 {
-  font-size: 18px;
+.brand {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  min-width: max-content;
+}
+.brand-name {
   font-weight: 600;
-  margin: 0 0 12px;
+  font-size: 14px;
   letter-spacing: -0.01em;
+}
+.brand-tag {
+  font-size: 11px;
+  color: var(--fg-muted);
+  letter-spacing: 0.02em;
 }
 
 .pr-form {
+  flex: 1;
+  min-width: 320px;
   display: flex;
   gap: 8px;
 }
-
 .url-input {
   flex: 1;
   padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 13px;
-  background: #f6f8fa;
+  background: var(--bg-subtle);
   color: var(--fg);
+  outline: none;
+  transition: border-color 120ms, background 120ms;
 }
 .url-input:focus {
-  outline: none;
   border-color: var(--accent);
   background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.12);
 }
-.url-input:disabled {
-  opacity: 0.6;
-}
+.url-input:disabled { opacity: 0.65; }
+.url-input::placeholder { color: var(--fg-muted); opacity: 0.7; }
 
 .btn {
   padding: 6px 14px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: #f6f8fa;
+  background: var(--bg-subtle);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   font-family: var(--sans);
   color: var(--fg);
-}
-.btn:hover:not(:disabled) {
-  background: #f3f4f6;
-}
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.loading {
-  margin-top: 16px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 6px;
-  color: var(--fg-muted);
-  font-size: 13px;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  transition: background 120ms, border-color 120ms;
 }
-.loading .dot {
-  width: 8px;
-  height: 8px;
+.btn:hover:not(:disabled) { background: #eef2f6; }
+.btn.primary {
+  background: #1f2328;
+  border-color: #1f2328;
+  color: #ffffff;
+}
+.btn.primary:hover:not(:disabled) {
+  background: #2d333b;
+  border-color: #2d333b;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn .dot {
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: var(--fg-muted);
-  animation: pulse 1.2s infinite ease-in-out;
+  background: currentColor;
+  opacity: 0.9;
+  animation: pulse 1.2s ease-in-out infinite;
 }
 @keyframes pulse {
-  0%,
-  100% {
-    opacity: 0.25;
-  }
-  50% {
-    opacity: 1;
-  }
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+/* ── Main column ───────────────────────────────────────────── */
+
+.app {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 24px;
 }
 
 .banner {
-  margin-top: 16px;
-  padding: 10px 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
   border-radius: 6px;
   font-size: 13px;
+  line-height: 1.5;
 }
 .banner.error {
   background: var(--error-bg);
@@ -238,26 +268,28 @@ body {
 }
 
 .result {
-  margin-top: 24px;
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 20px;
 }
 
+/* ── Section block (shared) ────────────────────────────────── */
+
+.block {
+  padding: 16px 18px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #ffffff;
+}
 .block h2 {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   color: var(--fg-muted);
-  margin: 0 0 10px;
+  margin: 0 0 12px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border-soft);
-  padding-bottom: 6px;
-}
-
-.summary-text {
-  margin: 0;
-  white-space: pre-wrap;
 }
 
 .section-error {
@@ -266,13 +298,36 @@ body {
   font-size: 13px;
   padding: 8px 10px;
   border-left: 2px solid var(--border);
-  background: #f6f8fa;
+  background: var(--bg-subtle);
   border-radius: 0 4px 4px 0;
+  line-height: 1.5;
 }
 
-.muted {
+/* ── Empty placeholder ─────────────────────────────────────── */
+
+.placeholder {
+  margin-top: 64px;
+  text-align: center;
   color: var(--fg-muted);
-  font-size: 13px;
+}
+.placeholder-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  color: var(--fg);
+}
+.placeholder-hint {
   margin: 0;
+  font-size: 13px;
+}
+.placeholder kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg-subtle);
+  color: var(--fg);
 }
 </style>
