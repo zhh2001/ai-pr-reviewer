@@ -121,3 +121,54 @@ func TestParseRisksJSON_Malformed(t *testing.T) {
 		})
 	}
 }
+
+// 混合用例：第二条 line 是字符串，反序列化失败应被跳过，前后两条保留。
+func TestParseRisksJSON_MixedItemsSkipsBad(t *testing.T) {
+	raw := `{"risks":[
+        {"file":"a.go","line":12,"severity":"high","category":"bug","description":"first","confidence":0.9},
+        {"file":"b.go","line":"oops","severity":"low","category":"style","description":"bad type","confidence":0.4},
+        {"file":"c.go","line":34,"severity":"medium","category":"performance","description":"third","confidence":0.6}
+    ]}`
+	got, err := ParseRisksJSON(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2; got=%+v", len(got), got)
+	}
+	if got[0].File != "a.go" || got[1].File != "c.go" {
+		t.Errorf("kept items mismatch: %+v", got)
+	}
+}
+
+// 数组里全是非对象（数字），每条 Unmarshal 失败 → 返回空 slice，无 error。
+func TestParseRisksJSON_AllItemsBadReturnsEmpty(t *testing.T) {
+	raw := `{"risks":[1, 2, "nope"]}`
+	got, err := ParseRisksJSON(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Errorf("got nil, want non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+// 数组结构本身畸形（key 对应的值不是数组）→ 仍 error，整通道失败。
+func TestParseRisksJSON_ArrayItselfMalformed(t *testing.T) {
+	cases := []string{
+		`{"risks":"not an array"}`,
+		`{"risks": 42}`,
+		`{"risks": {"a":1}}`,
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			got, err := ParseRisksJSON(raw)
+			if err == nil {
+				t.Fatalf("ParseRisksJSON(%q) = %+v, want error", raw, got)
+			}
+		})
+	}
+}
