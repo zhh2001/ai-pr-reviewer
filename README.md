@@ -1,7 +1,14 @@
 # ai-pr-reviewer
 
+[![CI](https://img.shields.io/github/actions/workflow/status/zhh2001/ai-pr-reviewer/ci.yml?branch=main&label=CI)](https://github.com/zhh2001/ai-pr-reviewer/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/zhh2001/ai-pr-reviewer)](LICENSE)
+[![Go](https://img.shields.io/github/go-mod/go-version/zhh2001/ai-pr-reviewer?filename=backend/go.mod&label=Go)](backend/go.mod)
+[![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vue.js&logoColor=white)](https://vuejs.org)
+[![Vite](https://img.shields.io/badge/Vite-6-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
+
 拉取指定 GitHub PR 的代码变更，调 DeepSeek 产出三类结果：总结、风险点、改进建议。
-后端 Go + go-github + go-openai（DeepSeek 兼容 OpenAI 接口），前端 Vue 3 + Vite。
+后端 Go + go-github + go-openai（DeepSeek 兼容 OpenAI 接口），前端 Vue 3 + Vite，
+结果通过 NDJSON 流式分批返回，前端按事件渐进渲染。
 
 设计取舍详见 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
@@ -9,16 +16,16 @@
 
 ```mermaid
 flowchart LR
-    UI[Vue 3 前端<br/>App.vue + 区块组件]
-    HTTP[httpserver<br/>POST /api/review]
-    AN[analyzer<br/>WaitGroup 并发 + 阈值过滤]
+    UI[Vue 3 前端<br/>App.vue + 分区组件 + Skeleton]
+    HTTP[httpserver<br/>POST /api/review<br/>POST /api/review/stream]
+    AN[analyzer<br/>WaitGroup 扇出 / 扇入 channel<br/>+ 阈值过滤]
     GH[github<br/>Fetcher + 错误分类]
     LLM[llm<br/>summary / risks / suggestions]
     PR[(pr<br/>domain types + interfaces)]
 
-    UI -- "fetch /api/review" --> HTTP
-    HTTP -- "ParseRef + Fetch" --> GH
-    HTTP -- "Analyze(ctx, changes)" --> AN
+    UI -- "fetch /api/review/stream" --> HTTP
+    HTTP -- "ParseRef + Fetch (pre-stream)" --> GH
+    HTTP -- "AnalyzeStream → events" --> AN
     AN -- "Summarize" --> LLM
     AN -- "DetectRisks" --> LLM
     AN -- "GenerateSuggestions" --> LLM
@@ -33,7 +40,8 @@ flowchart LR
 
 接口都在 `pr` 包，实现散在外层。`*llm.Client` 一个对象实现三个接口
 （Summarizer / RiskDetector / SuggestionGenerator），分别用不同模型；
-handler 用三组 mock 注入即可全链路离线测试。
+handler 用三组 mock 注入即可全链路离线测试。两个对外端点共用 `analyzer`：
+`/api/review` 走收集型 `Analyze`，`/api/review/stream` 走 `AnalyzeStream` 返回事件 channel。
 
 ## 目录结构
 
@@ -42,19 +50,21 @@ handler 用三组 mock 注入即可全链路离线测试。
 ├── backend/                     Go 后端
 │   ├── cmd/server/              入口 main
 │   └── internal/
-│       ├── pr/                  domain：PRChanges、Risk、Suggestion、4 个接口
+│       ├── pr/                  domain：PRChanges / Risk / Suggestion + 4 个接口
 │       ├── github/              go-github 封装 + 错误按状态码分类
-│       ├── llm/                 DeepSeek 客户端 + 三套 prompt + JSON 解析
-│       ├── analyzer/            三任务 WaitGroup 并发编排 + 置信度过滤
-│       ├── httpserver/          /healthz、POST /api/review handler
+│       ├── llm/                 DeepSeek 客户端 + 三套 prompt + JSON 解析（含 fence 兜底、逐条容错）
+│       ├── analyzer/            三任务 WaitGroup 并发编排：收集型 + 流式 + 置信度过滤
+│       ├── httpserver/          /healthz、POST /api/review、POST /api/review/stream
 │       └── config/              env 变量装载
 ├── frontend/                    Vue 3 + Vite
 │   └── src/
-│       ├── App.vue              顶层：输入 / loading / 顶部错误 banner
-│       ├── components/          ChangesOverview / RisksSection / SuggestionsSection
-│       └── severity.js          severity 排序与样式映射（带 vitest 单测）
+│       ├── App.vue              顶层：顶栏 / 输入 / 顶部错误 banner / 分区渐进渲染
+│       ├── severity.js          severity 排序与样式（vitest）
+│       ├── lib/                 markdown 消毒、NDJSON 切行、stream client、格式与 GitHub URL（全部 vitest）
+│       └── components/          ChangesOverview / SummaryView / RisksSection / SuggestionsSection / ResultSummary / Skeleton
 ├── docs/
-│   └── DESIGN.md                设计说明（架构 / 模型 / 上下文 / 误报 / 速度 / 健壮性）
+│   └── DESIGN.md                设计说明（架构 / 模型 / 上下文 / 误报 / 延迟 / 流式 / 健壮性）
+├── .github/workflows/ci.yml     CI：后端 build/vet/test -race + 前端 npm ci/build/test
 ├── .env.example
 └── README.md
 ```
@@ -96,21 +106,45 @@ Node 18+。
 
 ```bash
 cd frontend
-npm install
+npm install         # 或 npm ci，CI 用 ci
 npm run dev
 # Local: http://localhost:5173/
 ```
 
-Vite dev server 已经把 `/api/*` 代理到 `http://localhost:8080`。
+Vite dev server 已经把 `/api/*` 代理到 `http://localhost:8080`，**包括 NDJSON 流**——
+实测 chunk 直通不缓冲，前端 `fetch().getReader()` 拿到的就是后端 `Flush()` 出来的字节。
 
 生产构建：
 
 ```bash
 npm run build       # dist/ 下静态资源
-npm test            # vitest，severity 排序的 9 个用例
+npm test            # vitest，46 个用例（severity / format / github URL / markdown / ndjson 切行）
 ```
 
 ## 端到端 curl 示例
+
+### 流式（推荐，前端走的就是这条）
+
+```bash
+curl --no-buffer -N -s -X POST http://localhost:8080/api/review/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"pr_url":"sashabaranov/go-openai#1000"}'
+```
+
+NDJSON 输出（每行一个事件，按通道完成时刻陆续到达）：
+
+```text
+{"type":"changes","changes":{...}}
+{"type":"summary","summary":"..."}
+{"type":"risks","risks":[...],"risks_filtered":0}
+{"type":"suggestions","suggestions":[...]}
+{"type":"done"}
+```
+
+任一通道失败用 `{"type":"<channel>","error":"..."}` 表达；fetch / parse 失败在写流之前
+用 HTTP 状态码 + JSON 错误体返回，与下面的非流端点一致。
+
+### 一次性 JSON（兼容老调用）
 
 ```bash
 curl -s -X POST http://localhost:8080/api/review \
@@ -148,7 +182,7 @@ PR URL 两种格式都接：
 - 完整链接 `https://github.com/{owner}/{repo}/pull/{number}`
 - 简写 `{owner}/{repo}#{number}`
 
-错误码（详见 `docs/DESIGN.md` 第 6 节）：
+错误码（详见 `docs/DESIGN.md` 第 7 节）：
 
 | 输入 | HTTP |
 | --- | --- |
@@ -156,12 +190,8 @@ PR URL 两种格式都接：
 | PR / 仓库不存在 | 404 |
 | GitHub 限流 | 429 |
 | 其它上游错误 | 502 |
-| LLM 子任务失败 | 200，错误落到对应 `*_error` 字段 |
+| LLM 子任务失败 | 200，错误落到对应 `*_error` 字段（非流） / `{"type":"<channel>","error":"..."}` 事件（流） |
 
 ## 截图
 
-<!-- TODO: 补一张正常返回的截图到 docs/screenshots/normal.png 并替换下面这行 -->
-![界面截图占位 — 正常返回的 Review 结果](docs/screenshots/normal.png)
-
-<!-- TODO: 补一张降级态的截图（部分 *_error 存在）到 docs/screenshots/partial.png -->
-![界面截图占位 — 部分通道降级时的展示](docs/screenshots/partial.png)
+![正常返回的 Review 结果](docs/screenshots/normal.jpeg)
