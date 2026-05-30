@@ -7,7 +7,7 @@
 
 monorepo：
 
-- `/backend` —— Go 1.22，模块路径 `github.com/zhh2001/ai-pr-reviewer/backend`，
+- `/backend` —— Go 1.22，模块路径 `github.com/zhh2001/ai-pr-reviewer/backend`,
   二进制 `cmd/server`。
 - `/frontend` —— Vue 3 + Vite，Dev server 用 Vite 把 `/api/*` 代理到
   `http://localhost:8080`，所以前端代码里直接 `fetch('/api/...')`。
@@ -16,12 +16,11 @@ monorepo：
 
 ```text
                        +---------------+
-                       |   httpserver  |  HTTP 边界 (handler / mux)
-                       |    review.go  |
+                       |   httpserver  |  HTTP 边界 (review.go / stream.go)
                        +-------+-------+
                                |
                        +-------v-------+
-                       |   analyzer    |  并发编排 + 风险过滤
+                       |   analyzer    |  并发编排（收集型 + 流式）+ 风险过滤
                        +-------+-------+
                                |
               +----------------+----------------+
@@ -48,8 +47,9 @@ monorepo：
   HTTP client，三次调用，分别选不同模型；测试时 handler 用三组独立的 mock 注入，
   各自验证降级语义。
 
-`internal/httpserver/review_test.go` 与 `internal/analyzer/analyzer_test.go`
-能在不连 DeepSeek、不连 GitHub 的情况下走完全链路，靠的就是这个边界。
+`internal/httpserver/review_test.go` / `stream_test.go` 与
+`internal/analyzer/analyzer_test.go` 能在不连 DeepSeek、不连 GitHub 的情况下走完
+全链路，靠的就是这个边界。
 
 ## 2. 模型选择
 
@@ -60,7 +60,7 @@ DeepSeek 提供 OpenAI 兼容接口，`base_url = https://api.deepseek.com`。�
 | --- | --- | --- |
 | `summary` | `deepseek-v4-flash` | 总结只需把"改了什么、为什么、影响面"说清，可读即可，对延迟敏感。 |
 | `suggestions` | `deepseek-v4-flash` | 建议是增强性意见，多一条少一条不阻断 merge，可以容错。 |
-| `risks` | `deepseek-v4-flash` | 起初选 `deepseek-v4-pro` 追求准（结构化 JSON + 行号 + 误报控制）。真实联调里 pro 上的 risks 在 48KB 上下文 + 思维链下经常超过 180s 分析超时，整段 risks 走 `risks_error` 降级丢掉。flash 默认开思考、推理质量已接近 pro 但显著更快——准确性轻微让步换稳定能返回的结果。 |
+| `risks` | `deepseek-v4-flash` | 起初选 `deepseek-v4-pro` 追求准（结构化 JSON + 行号 + 误报控制）。真实联调里 pro 上的 risks 在 48KB 上下文 + 思维链下经常超过当时的 90s 分析超时，整段 risks 走 `risks_error` 降级丢掉。flash 默认开思考、推理质量已接近 pro 但显著更快——准确性轻微让步换稳定能返回的结果。 |
 
 常量与取舍都写在 `internal/llm/client.go` 的注释里，并由
 `TestModelConstants` 锁住"三档都是 flash"的现状。
@@ -75,8 +75,9 @@ DeepSeek 提供 OpenAI 兼容接口，`base_url = https://api.deepseek.com`。�
    代码块、不要前后缀。顶层结构必须是 `{"risks":[...]}` / `{"suggestions":[...]}`"。
 
 只用其一不够：DeepSeek 没有第二条时偶发吐空白卡死；没有第一条时偶发把 JSON 包在
-` ```json` 代码块里。解析端再加一层 `stripFences`（`internal/llm/parse.go`），
-即便系统提示被忽略也能恢复。三层一起够稳。
+` ```json` 代码块里。解析端再加一层 `stripFences` 与"逐条 Unmarshal 跳过坏条"
+（都在 `internal/llm/parse.go`）——即便系统提示被忽略、单条 item 字段类型不对，
+也能保住其它条的可见性。
 
 `summary` 不走 `json_object`——它是自由文本，开 JSON 模式反而会逼模型把文本塞
 `{"summary":"..."}` 里，多一道无意义的反序列化。
@@ -90,7 +91,7 @@ DeepSeek 提供 OpenAI 兼容接口，`base_url = https://api.deepseek.com`。�
 - `PullRequests.Get` 拿元信息（title / body / author / base / head）。
 - `PullRequests.ListFiles` 拉变更文件列表，含 `patch`。`PerPage: 100`，循环到
   `resp.NextPage == 0` 为止——PR 文件数大于 100 时会跨页。
-- 错误统一过一遍 `classifyFetchError`，对外只暴露 `*FetchError`（详见第 6 节），
+- 错误统一过一遍 `classifyFetchError`，对外只暴露 `*FetchError`（详见第 7 节），
   handler 层不引 go-github。
 
 ### 截断（字节预算）
@@ -156,47 +157,172 @@ DeepSeek 提供 OpenAI 兼容接口，`base_url = https://api.deepseek.com`。�
 - **没有跨 PR 的学习**。本期不维护"过去 N 次 review 中哪类风险被人忽略"的反馈环，
   没必要为 demo 做半个产品。
 
-## 5. 响应速度
+## 5. 延迟与性能
+
+### 算法上的目标
+
+三个 LLM 子任务相互独立。串行实现里耗时是 `T_summary + T_risks + T_suggestions`；
+并发实现把它压成 `max(T_summary, T_risks, T_suggestions)`。配合**流式分批返回**
+（见第 6 节），用户感知到的"首屏"进一步缩到 `T_fetch_PR ≈ 1.3-1.5s`——changes 就先
+到了，summary / risks / suggestions 完成时各自再陆续到。
+
+### 实测（本机 `.env`，`ANALYZE_TIMEOUT_SECONDS=90`，匿名 GitHub，真实 DeepSeek key）
+
+| PR | files | 实测墙钟 | 各通道结果 |
+| --- | --- | --- | --- |
+| `sashabaranov/go-openai#1000` | 1 | **6.88s** | 三通道全成功；summary 168 字 / 1 risk / 2 suggestion |
+| `sashabaranov/go-openai#1000`（重测） | 1 | 23.11s | 三通道全成功 |
+| `sashabaranov/go-openai#1000`（再测） | 1 | 91.23s | 三通道**全 timeout**（DeepSeek 端瘫一会儿） |
+| `spf13/cobra#2000` | 1 | 3.99s | 三通道全成功；summary 121 字 / 0 risk / 0 suggestion |
+| `spf13/cobra#2000`（重测） | 1 | 305.18s | 三通道全 timeout |
+| `kubernetes/kubernetes#10000`（v4-flash） | 61 | **9.75s** | 三通道全成功；summary 314 字 / 1 risk / 5 suggestion |
+| `kubernetes/kubernetes#10000`（曾用 v4-pro） | 61 | 91.37s | summary + suggestions 回了，**risks timeout** |
+
+从上面这张表能读出三件事：
+
+1. **risks 切到 flash 是有意义的**：k8s 61 文件那条，v4-pro 在 90s 里 risks 拿不回来，切 flash 后 9.75s 全回了——同样工作负载、同样超时档位，结果完全不同。
+2. **DeepSeek 单次延迟波动极大**：同一个 1 文件 PR（cobra#2000）一次 4 秒、另一次 305 秒 timeout；同一个 go-openai#1000 一次 7 秒、另一次 91 秒 timeout。这是**外部服务的不稳定**，不是本系统的问题——本机进程、本机 fetch、本机解析都不会有这种 100 倍量级的抖动。
+3. **大 PR ≠ 慢**：61 文件的 k8s PR（9.75s）反而比 1 文件的 cobra PR 的某些重测（305s timeout）快，因为 LLM 端的延迟主要由它当时的排队 / 思考长度决定，和我们这里塞进去的 patch 大小不成简单正比。
+
+### 系统怎么兜底外部抖动
+
+- **180s 整体超时**（`DefaultAnalyzeTimeout`）。原来 90s 偶发不够，从联调数据观察 p99 后调高到 180s。常量由 `TestDefaultAnalyzeTimeout` 锁住。
+- **三通道独立降级**：任一通道超时只让自己那条走 `*_error`，另两条照常返回。k8s 那次曾用 v4-pro 的跑就是这条机制——risks timeout 不影响 summary + suggestions。
+- **流式分批返回**（第 6 节）：哪怕 risks 真的扛不住，前端在 ~1.5s 就拿到 changes 开始渲染，summary / suggestions 完成时各自渲染。用户不会盯着空白等 90 秒。
 
 ### 决策：WaitGroup 而不是 errgroup
 
-三个 LLM 子任务（summary / risks / suggestions）相互独立。串行实现里耗时是
-`T_summary + T_risks + T_suggestions`；并发后是 `max(...)`。
+`golang.org/x/sync/errgroup` 的语义是"一败俱败"——任一任务返回非 nil error 就 cancel 共享 ctx。这与本项目"独立降级"的契约直接冲突。
 
-为什么不用 `golang.org/x/sync/errgroup`？因为 errgroup 的语义是"一败俱败"——
-任一任务返回非 nil error 就 cancel 共享 ctx。这与本项目要求的"独立降级"直接冲突：
-单通道失败时另外两个**必须继续跑完**，对应字段 `summary_error / risks_error /
-suggestions_error` 各自带各自的错误，整体仍 200 返回。
+所以两个编排都用 `sync.WaitGroup`：
 
-所以用 `sync.WaitGroup` + 每任务独立的局部变量（`summary/summaryErr`,
-`risks/risksErr`, `suggestions/sugErr`），主 goroutine 在 `wg.Wait()` 之后单线程
-汇总进 `ReviewResult`。禁止多个 goroutine 写同一字段。
+- 收集型 `Analyze`：每任务独立局部变量 + `wg.Wait()` 之后单线程汇总进 `ReviewResult`。
+- 流式 `AnalyzeStream`：三个 worker 把 `Event` 写到 buffered(3) channel，单消费方
+  按到达顺序读出来；channel 操作天然 atomic，不需要额外锁。
 
-数据竞争靠 `go test -race ./...` 守门。其中 `TestAnalyze_RunsConcurrently` 用三方
-rendezvous `sync.WaitGroup` 验证三任务确实并发起来（串行会卡死），不依赖时间断言
-避免 flaky。
+数据竞争靠 `go test -race ./...` 守门。`TestAnalyze_RunsConcurrently` 用三方 rendezvous
+`sync.WaitGroup` 锁住"真的并发起来了"（串行会卡死），不依赖时间断言避免 flaky。
 
 ### 整体超时
 
 `analyzer.New` 接收 `timeout`（来自 `Config.AnalyzeTimeout`，env
-`ANALYZE_TIMEOUT_SECONDS`，默认 `180s`）。`Analyze` 内部用
+`ANALYZE_TIMEOUT_SECONDS`，默认 `180s`）。两个编排都用
 `context.WithTimeout(ctx, timeout)` 派生一个共享 ctx 喂给三个 goroutine。
 
 超时**只**触发 ctx 取消，**不**触发任务相互取消——三任务各自的调用收到
 `ctx.Err()` 后正常返回错误，handler 走对应通道的降级路径。
 `TestAnalyze_TimeoutMarksAllChannels` 锁住这条不变量。
 
-### 量级
+## 6. 流式架构
 
-按 sum→max 的算法变化，以及 DeepSeek 公开的 flash / pro 典型延迟量级，
-单次请求的墙钟时间应从大致 `8–16s` 降到 `4–8s`（取决于 risks 这条最慢通道）。
+`POST /api/review/stream` 在 `internal/httpserver/stream.go` 实现，与 `POST /api/review` 共用 `Analyzer`，区别只在编排和写出方式。
 
-这里给的是**算法分析 + 量级估算**，不是当前 commit 上的基准。要拿到真实数字，
-方法是：把 ANALYZE_TIMEOUT_SECONDS 调到足够大，重复请求一个固定 PR 计 `time curl`，
-对比把 `analyzer.Analyze` 临时改成串行后的结果。这步留给本机有 DeepSeek key 的人
-现场跑。
+### 协议：NDJSON
 
-## 6. 健壮性
+一行一个 JSON 对象，写一行 Flush 一次。响应头：
+
+```
+Content-Type: application/x-ndjson
+Cache-Control: no-cache
+X-Accel-Buffering: no
+```
+
+`X-Accel-Buffering: no` 让 nginx 这类反向代理别再二次缓冲；vite dev server 实测也
+是直通转发，不需要任何配置。
+
+事件类型：
+
+| `type` | 字段 | 何时发 |
+| --- | --- | --- |
+| `changes` | `changes: {…}` | 抓到 PR 元 + 文件列表后立刻发，作为流的第一条 |
+| `summary` | `summary` 或 `error` | summary 通道完成 |
+| `risks` | `risks`, `risks_filtered` 或 `error` | risks 通道完成（含阈值过滤） |
+| `suggestions` | `suggestions` 或 `error` | suggestions 通道完成 |
+| `done` | _(无)_ | 三个通道都结束后发出，作为流的最后一条 |
+
+### Fetch 先于流
+
+parse pr_url、检查 Flusher、调 `Fetcher.Fetch` 都在写任何 NDJSON 字节**之前**完成：
+
+- parse 失败 → `400` + JSON 错误体
+- fetch 失败 → 走 `writeFetchError` 映射的 `404 / 429 / 502` + JSON 错误体
+- Flusher 不可用 → `500` + JSON 错误体
+
+只有 fetch 成功（HTTP 200 即将写出）才会 `w.Header().Set` 切到 NDJSON、`WriteHeader(200)`、开始 emit。这条边界让流式端点的**错误状态码语义与非流端点完全一致**。`TestStream_FetcherErrorDoesNotStartStream` 锁住"fetch 失败时 body 不含任何 `"type":"changes"` / `"done"` 字符串"。
+
+### 扇出 / 扇入
+
+```text
+   Analyzer.AnalyzeStream(ctx, changes) -> <-chan Event
+              │
+              │  ctx, _ := context.WithTimeout(ctx, 180s)
+              │
+   ┌──────────┼──────────┐
+   │ go runSummary       │
+   │ go runRisks         │ ── 三个 worker，每条完成就 out <- Event{Kind, …}
+   │ go runSuggestions   │
+   └──────────┬──────────┘
+              │  wg.Wait(); close(out)
+              ▼
+        buffered(3) channel
+              │
+              ▼
+   stream handler (单 goroutine)
+     for ev := range stream { enc.Encode(eventToWire(ev)); flusher.Flush() }
+     emit({"type":"done"})
+```
+
+- 3 个 worker 多写、handler 单读——Go channel 操作 atomic，不需要锁。
+- handler 只负责"按到达顺序串行 Encode + Flush"——绝不让多个 goroutine 直接写 ResponseWriter，避免数据竞争和写到一半被打断。
+- `wg.Wait()` 之后 `close(out)`，`range` 自然退出，最后 emit `done`。
+- 跑 `go test -race ./...` 把上面整套路径覆盖了；`TestAnalyzeStream_*` 用 mock 接口验证事件总数、顺序无关性、过滤计数、单通道失败不影响其它通道。
+
+### 流式下保留的独立降级
+
+任一通道失败只在自己那条 event 上写 `error`：
+
+```
+{"type":"summary","summary":"..."}
+{"type":"risks","error":"Post \"...\": context deadline exceeded"}
+{"type":"suggestions","suggestions":[...]}
+{"type":"done"}
+```
+
+`TestStream_DetectorErrorEmitsRiskErrorEventOnly` 把"detector 报错只让 risks 事件
+带 error、summary / suggestions 不变"钉进单元测试。
+
+### 前端渐进 UX
+
+前端 `lib/ndjson.js` 把"分块 → 行 → 事件"的缓冲切分抽成纯函数 `splitLines`，
+单独被 14 条 vitest 用例覆盖（单块多行 / 跨块拼接 / CRLF / 空行 / 末尾残行 / 等）。
+`lib/stream-client.js` 用它驱动 `response.body.getReader() + TextDecoder`。
+
+App.vue 收到事件后按 type 渐进写入 `result.value`：
+
+| 事件到 | 浏览器画面变化 |
+| --- | --- |
+| 初始（loading + 无 result） | 整页 4-block Skeleton |
+| `changes` | ChangesOverview 出 + ResultSummary 一行（`— risks · — suggestions · N files`）+ 三个 section 各自 kind-specific Skeleton |
+| `summary` | Summary 区骨架→ markdown 文本（DOMPurify + markdown-it 双层消毒） |
+| `risks` | Risks 区骨架→ severity pill + confidence bar + chip；ResultSummary 上 `—` 换成数字并画 severity 分布 |
+| `suggestions` | Suggestions 区骨架→ 按 category 分组的列表 |
+| `done` | loading 关，按钮恢复 |
+
+### 实测时序（vite 代理透传）
+
+经 `http://localhost:5173/api/review/stream` 打小 PR：
+
+```
+[+1.397s] type=changes      files=1
+[+4.921s] type=summary      summary_len=208
+[+5.564s] type=suggestions  n=2
+[+9.420s] type=risks        n=1 filtered=0
+[+9.441s] type=done
+```
+
+5 行陆续到达，间隔分别是 +3.5s / +0.6s / +3.9s / +0.02s——如果 vite 缓冲了，这 5 行会一起在 ~9.4s 时一齐到。**事实没有，证明 vite dev proxy 把 NDJSON chunk 直通转发**，浏览器端 `fetch().getReader()` 拿到的就是后端 `Flush()` 出去的字节。
+
+## 7. 健壮性
 
 ### 三通道独立降级
 
@@ -210,8 +336,10 @@ detector 失败 → result.RisksError  = err.Error()
 ```
 
 summary / suggestions 同型。三者互不影响。这条契约由 4 个 handler 测试 +
-2 个 analyzer 测试锁住：`TestReview_{Summarizer,Detector,Generator}Error`、
-`TestAnalyze_Only{Summarizer,Detector,Generator}Fails`。
+3 个 analyzer 测试锁住：`TestReview_{Summarizer,Detector,Generator}Error`、
+`TestAnalyze_Only{Summarizer,Detector,Generator}Fails`。流式端点的对应不变量由
+`TestStream_DetectorErrorEmitsRiskErrorEventOnly` 与
+`TestAnalyzeStream_DetectorErrorIsolated` 锁住。
 
 ### 上游错误按状态码分
 
@@ -231,13 +359,12 @@ handler `writeFetchError` 据此映射成 HTTP 状态：
 | KindRateLimited | 429 | "GitHub 限流，请稍后重试" |
 | KindUpstream | 502 | `fetch pr: <上游原始消息>` |
 | 解析失败 / 缺字段 | 400 | 具体 error |
-| analyzer 错误 | 200 | 主体在 `*_error` 字段 |
+| analyzer 错误 | 200 | 非流：主体在 `*_error` 字段；流：通道 event 的 `error` 字段 |
 
-前端 `App.vue` 顶部错误 banner 直接展示 status + message，对 404 / 429 用户可读
-（"PR 不存在"、"限流"）；分通道错误在对应 section 内显示一行灰色降级提示，
-不污染其它 section 的渲染。
+前端 `App.vue` 顶部错误 banner 直接展示 status + message，对 404 / 429 用户可读；
+分通道错误在对应 section 内显示一行灰色降级提示，不污染其它 section 的渲染。
 
-## 7. 未来扩展
+## 8. 未来扩展
 
 - **GitLab / Bitbucket**：抽 `pr.Fetcher` 接口的另一个实现（沿用本项目已有的边界）。
 - **回写为 PR 评论**：拿到 ReviewResult 后调 GitHub `POST /repos/{}/{}/pulls/{}/reviews`，
@@ -247,9 +374,10 @@ handler `writeFetchError` 据此映射成 HTTP 状态：
   贴回 PR；CI 中作为 status check。
 - **结果缓存**：以 `(owner, repo, sha)` 为 key 缓存 ReviewResult，避免 PR 没改时
   重复烧 LLM token。
-- **流式返回**：summary / suggestions 走 SSE，前端边收边渲染；risks 仍等齐 JSON 后
-  整体返回（结构化输出难以增量解析）。
+- **token-level 流式**：当前 NDJSON 是按通道粒度推（summary 完成一次推一整段）；
+  可以进一步把 summary 改成 token 流（DeepSeek 支持 SSE），让长文本边生成边显示。
+  risks / suggestions 仍维持整段 JSON 推送（结构化输出难以增量解析）。
 - **行级定位增强**：现在 `Risk.Line` 是模型自报；可叠一层"行号是否落在 diff 的
   `@@ -a,b +c,d @@` hunk 范围内"的校验，落不到的回退到 file-level（line=0）。
 - **模型路由**：根据 PR 改动量自适应选模型——小 PR 全 flash，大 PR / 安全敏感
-  路径全 pro。需要先攒一批人工标注的对比数据再做。
+  路径试 pro。需要先攒一批人工标注的对比数据再做。
