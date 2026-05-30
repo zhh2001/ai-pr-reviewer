@@ -12,6 +12,10 @@
 
 设计取舍详见 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
+## Demo
+
+[![观看演示视频](docs/screenshots/demo-cover.png)](https://www.bilibili.com/video/BV1dgVG6cEeu/)
+
 ## 架构
 
 ```mermaid
