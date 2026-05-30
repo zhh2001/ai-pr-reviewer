@@ -10,9 +10,9 @@ import (
 )
 
 // suggestions 与 risks 维度互补：
-// - risks 报"明显的问题"，要准，用 deepseek-v4-pro。
-// - suggestions 报"可以更好的建议"，非阻断、容错性高，用 flash 控成本/延迟即可。
-//   建议偶尔多一条少一条无伤大雅，把推理预算留给 risks 更划算。
+//   - risks 报"明显的问题"，需要结构化 JSON + 行号 + 误报控制。曾用 v4-pro 追求准，
+//     实测在 48KB 上下文 + 思维链下经常超过 180s 分析超时，改回 v4-flash 后稳定能拿到结果。
+//   - suggestions 报"可以更好的建议"，本来就非阻断、容错性高，flash 完全够用。
 const suggestionsSystemPrompt = `你是一个资深工程师，正在为 PR 提改进建议。
 注意：bug / 安全 / 性能 这类"问题/风险"由 risks 通道负责，不要在这里重复。
 suggestions 只覆盖可读性、命名、补测试、结构、文档等增强性意见。

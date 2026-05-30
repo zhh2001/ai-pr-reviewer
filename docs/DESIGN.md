@@ -53,16 +53,17 @@ monorepo：
 
 ## 2. 模型选择
 
-DeepSeek 提供 OpenAI 兼容接口，`base_url = https://api.deepseek.com`。三个子任务分两档：
+DeepSeek 提供 OpenAI 兼容接口，`base_url = https://api.deepseek.com`。三个子任务目前
+都用 `deepseek-v4-flash`：
 
 | 通道 | 模型 | 为什么 |
 | --- | --- | --- |
 | `summary` | `deepseek-v4-flash` | 总结只需把"改了什么、为什么、影响面"说清，可读即可，对延迟敏感。 |
 | `suggestions` | `deepseek-v4-flash` | 建议是增强性意见，多一条少一条不阻断 merge，可以容错。 |
-| `risks` | `deepseek-v4-pro` | 风险要求结构化输出 + 行号定位 + 误报控制，准确性比延迟更重要。 |
+| `risks` | `deepseek-v4-flash` | 起初选 `deepseek-v4-pro` 追求准（结构化 JSON + 行号 + 误报控制）。真实联调里 pro 上的 risks 在 48KB 上下文 + 思维链下经常超过 180s 分析超时，整段 risks 走 `risks_error` 降级丢掉。flash 默认开思考、推理质量已接近 pro 但显著更快——准确性轻微让步换稳定能返回的结果。 |
 
-把贵的推理预算留给"必须准"的通道，便宜的延迟敏感任务用 flash，是有意的分层而不是
-为了用全 SKU。常量与原因都写在 `internal/llm/client.go` 的注释里。
+常量与取舍都写在 `internal/llm/client.go` 的注释里，并由
+`TestModelConstants` 锁住"三档都是 flash"的现状。
 
 ### 结构化输出的稳定性
 
