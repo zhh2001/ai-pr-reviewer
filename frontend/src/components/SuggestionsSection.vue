@@ -2,13 +2,16 @@
 import { computed } from 'vue'
 import { groupByCategory } from '../lib/format.js'
 import { prFilesUrl } from '../lib/github.js'
+import Skeleton from './Skeleton.vue'
 
 const props = defineProps({
-  suggestions: { type: Array, default: () => [] },
+  suggestions: { type: Array, default: null },
   suggestionsError: { type: String, default: '' },
+  pending: { type: Boolean, default: false },
   changes: { type: Object, default: () => ({}) },
 })
 
+const arrived = computed(() => Array.isArray(props.suggestions))
 const groups = computed(() => groupByCategory(props.suggestions || []))
 const filesHref = computed(() =>
   prFilesUrl(props.changes?.owner, props.changes?.repo, props.changes?.number),
@@ -22,6 +25,8 @@ const filesHref = computed(() =>
     <p v-if="suggestionsError" class="section-error">
       本节分析暂时失败：{{ suggestionsError }}
     </p>
+
+    <Skeleton v-else-if="pending && !arrived" kind="suggestions" />
 
     <template v-else>
       <div v-if="groups.length" class="groups">
