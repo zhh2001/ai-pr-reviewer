@@ -104,3 +104,54 @@ func TestParseSuggestionsJSON_Malformed(t *testing.T) {
 		})
 	}
 }
+
+// 第二条 line 是字符串，反序列化失败应被跳过，其余条保留。
+func TestParseSuggestionsJSON_MixedItemsSkipsBad(t *testing.T) {
+	raw := `{"suggestions":[
+        {"file":"a.go","line":12,"category":"naming","suggestion":"first"},
+        {"file":"b.go","line":"oops","category":"style","suggestion":"bad type"},
+        {"file":"c.go","line":34,"category":"testing","suggestion":"third"}
+    ]}`
+	got, err := ParseSuggestionsJSON(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2; got=%+v", len(got), got)
+	}
+	if got[0].File != "a.go" || got[1].File != "c.go" {
+		t.Errorf("kept items mismatch: %+v", got)
+	}
+}
+
+func TestParseSuggestionsJSON_AllItemsBadReturnsEmpty(t *testing.T) {
+	// 用确凿会反序列化失败的数字和字符串。null 在 Go 反序列化到 struct 会成功
+	// （零值），不属于"失败"语义，所以不在这条用例覆盖范围。
+	raw := `{"suggestions":[1, 2, "nope"]}`
+	got, err := ParseSuggestionsJSON(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Errorf("got nil, want non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+func TestParseSuggestionsJSON_ArrayItselfMalformed(t *testing.T) {
+	cases := []string{
+		`{"suggestions":"not an array"}`,
+		`{"suggestions": 42}`,
+		`{"suggestions": {"a":1}}`,
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			got, err := ParseSuggestionsJSON(raw)
+			if err == nil {
+				t.Fatalf("ParseSuggestionsJSON(%q) = %+v, want error", raw, got)
+			}
+		})
+	}
+}
