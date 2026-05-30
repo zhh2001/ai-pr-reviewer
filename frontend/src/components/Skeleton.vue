@@ -1,29 +1,51 @@
 <script setup>
-// 占位骨架：覆盖结果区主要区块的形状。用静态 opacity 脉冲，不用彩色渐变。
+// kind: 'full' 渲染完整结果区骨架；'summary' / 'risks' / 'suggestions' 各自渲染分区
+// 内部的占位条。形状刻意贴合该区块完成态的密度，让"骨架→内容"切换时视觉抖动最小。
+defineProps({
+  kind: { type: String, default: 'full' },
+})
 </script>
 
 <template>
-  <div class="skel" role="status" aria-label="Loading review">
-    <div class="block">
-      <div class="bar h-meta w-25"></div>
-      <div class="bar h-title w-60"></div>
-      <div class="bar h-line w-40"></div>
-    </div>
-    <div class="block">
-      <div class="bar h-meta w-15"></div>
-      <div class="bar h-line w-90"></div>
+  <div :class="['skel', `skel-${kind}`]" role="status" aria-busy="true">
+    <template v-if="kind === 'full'">
+      <div class="block">
+        <div class="bar h-meta w-25"></div>
+        <div class="bar h-title w-60"></div>
+        <div class="bar h-line w-40"></div>
+      </div>
+      <div class="block">
+        <div class="bar h-meta w-15"></div>
+        <div class="bar h-line w-90"></div>
+        <div class="bar h-line w-95"></div>
+        <div class="bar h-line w-70"></div>
+      </div>
+      <div class="block">
+        <div class="bar h-meta w-15"></div>
+        <div class="bar h-card"></div>
+        <div class="bar h-card"></div>
+      </div>
+      <div class="block">
+        <div class="bar h-meta w-20"></div>
+        <div class="bar h-card"></div>
+      </div>
+    </template>
+
+    <template v-else-if="kind === 'summary'">
       <div class="bar h-line w-95"></div>
+      <div class="bar h-line w-90"></div>
       <div class="bar h-line w-70"></div>
-    </div>
-    <div class="block">
-      <div class="bar h-meta w-15"></div>
+    </template>
+
+    <template v-else-if="kind === 'risks'">
       <div class="bar h-card"></div>
       <div class="bar h-card"></div>
-    </div>
-    <div class="block">
-      <div class="bar h-meta w-20"></div>
+    </template>
+
+    <template v-else-if="kind === 'suggestions'">
       <div class="bar h-card"></div>
-    </div>
+      <div class="bar h-card"></div>
+    </template>
   </div>
 </template>
 
@@ -31,8 +53,15 @@
 .skel {
   display: flex;
   flex-direction: column;
-  gap: 24px;
 }
+.skel-full { gap: 24px; }
+.skel-summary,
+.skel-risks,
+.skel-suggestions {
+  gap: 8px;
+  padding: 2px 0;
+}
+
 .block {
   display: flex;
   flex-direction: column;
@@ -41,6 +70,7 @@
   border: 1px solid var(--border-soft);
   border-radius: 8px;
 }
+
 .bar {
   background: #eaeef2;
   border-radius: 4px;
@@ -59,6 +89,7 @@
 .bar.w-80 { width: 80%; }
 .bar.w-90 { width: 90%; }
 .bar.w-95 { width: 95%; }
+
 @keyframes skel-pulse {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 0.95; }

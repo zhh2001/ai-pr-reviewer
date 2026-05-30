@@ -3,14 +3,18 @@ import { computed } from 'vue'
 import { sortBySeverity, severityClass } from '../severity.js'
 import { confidenceBarPercent } from '../lib/format.js'
 import { prFilesUrl } from '../lib/github.js'
+import Skeleton from './Skeleton.vue'
 
 const props = defineProps({
-  risks: { type: Array, default: () => [] },
+  risks: { type: Array, default: null },
   risksError: { type: String, default: '' },
   risksFiltered: { type: Number, default: 0 },
+  pending: { type: Boolean, default: false },
   // 用于把 file:line chip 链到 GitHub 的 Files changed 页
   changes: { type: Object, default: () => ({}) },
 })
+
+const arrived = computed(() => Array.isArray(props.risks))
 
 const sorted = computed(() => sortBySeverity(props.risks ?? []))
 const filesHref = computed(() =>
@@ -30,6 +34,8 @@ function formatConfidence(c) {
     <p v-if="risksError" class="section-error">
       本节分析暂时失败：{{ risksError }}
     </p>
+
+    <Skeleton v-else-if="pending && !arrived" kind="risks" />
 
     <template v-else>
       <p v-if="risksFiltered > 0" class="filtered-note">

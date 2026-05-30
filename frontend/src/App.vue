@@ -1,36 +1,98 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, reactive } from 'vue'
 import ChangesOverview from './components/ChangesOverview.vue'
 import RisksSection from './components/RisksSection.vue'
 import SuggestionsSection from './components/SuggestionsSection.vue'
 import SummaryView from './components/SummaryView.vue'
 import ResultSummary from './components/ResultSummary.vue'
 import Skeleton from './components/Skeleton.vue'
+import { readNDJSONStream } from './lib/stream-client.js'
 
 const prUrl = ref('')
 const loading = ref(false)
 const topError = ref('')
+
+// result 起始是 null（什么都没回来，整屏 Skeleton 兜底）。第一个事件到达时
+// 才把它变成 {}，之后按 type 渐进往里填字段。组件已经按 ReviewResult 的形状取数。
 const result = ref(null)
+
+// pending 标记每个通道是否还在等：true 期间分区显示 Skeleton kind="summary/risks/..."。
+const pending = reactive({ summary: false, risks: false, suggestions: false })
 
 async function review() {
   topError.value = ''
   result.value = null
+  pending.summary = true
+  pending.risks = true
+  pending.suggestions = true
   loading.value = true
+
+  let sawDone = false
   try {
-    const res = await fetch('/api/review', {
+    const res = await fetch('/api/review/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pr_url: prUrl.value.trim() }),
     })
+    // pre-stream 错误：后端在写任何 NDJSON 字节前用 JSON 错误体回应，response.ok=false。
     if (!res.ok) {
       topError.value = await extractError(res)
       return
     }
-    result.value = await res.json()
+    await readNDJSONStream(res, (ev) => {
+      applyEvent(ev)
+      if (ev.type === 'done') sawDone = true
+    })
+    if (!sawDone) {
+      topError.value = 'Stream ended before completion.'
+    }
   } catch (e) {
-    topError.value = `Request failed: ${e?.message ?? e}`
+    topError.value = `Stream error: ${e?.message ?? e}`
   } finally {
     loading.value = false
+    // 兜底：流中断时把任何还在 pending 的通道翻成"已结束"，
+    // 让分区不再卡在 Skeleton；它们会渲染各自的 empty/error 占位。
+    pending.summary = false
+    pending.risks = false
+    pending.suggestions = false
+  }
+}
+
+function applyEvent(ev) {
+  if (!result.value) result.value = {}
+  const r = result.value
+  switch (ev.type) {
+    case 'changes':
+      r.changes = ev.changes
+      break
+    case 'summary':
+      if (typeof ev.error === 'string' && ev.error) {
+        r.summary_error = ev.error
+      } else {
+        r.summary = ev.summary || ''
+      }
+      pending.summary = false
+      break
+    case 'risks':
+      if (typeof ev.error === 'string' && ev.error) {
+        r.risks_error = ev.error
+      } else {
+        r.risks = Array.isArray(ev.risks) ? ev.risks : []
+        r.risks_filtered = typeof ev.risks_filtered === 'number' ? ev.risks_filtered : 0
+      }
+      pending.risks = false
+      break
+    case 'suggestions':
+      if (typeof ev.error === 'string' && ev.error) {
+        r.suggestions_error = ev.error
+      } else {
+        r.suggestions = Array.isArray(ev.suggestions) ? ev.suggestions : []
+      }
+      pending.suggestions = false
+      break
+    case 'done':
+      // 终止信号，不携带状态
+      break
   }
 }
 
@@ -81,25 +143,30 @@ async function extractError(res) {
     <main class="app">
       <div v-if="topError" class="banner error">{{ topError }}</div>
 
-      <Skeleton v-if="loading" />
+      <!-- 第一个事件还没到：整页 Skeleton -->
+      <Skeleton v-if="loading && !result" kind="full" />
 
-      <section v-else-if="result && result.changes" class="result">
-        <ResultSummary :result="result" />
-        <ChangesOverview :changes="result.changes" />
+      <!-- 一旦收到任一事件（一般是 changes）就渲染结果区，缺失通道按 pending 走 Skeleton -->
+      <section v-else-if="result" class="result">
+        <ResultSummary v-if="result.changes" :result="result" :pending="pending" />
+        <ChangesOverview v-if="result.changes" :changes="result.changes" />
         <SummaryView
           :summary="result.summary || ''"
           :summary-error="result.summary_error || ''"
+          :pending="pending.summary"
         />
         <RisksSection
-          :risks="result.risks || []"
+          :risks="result.risks ?? null"
           :risks-error="result.risks_error || ''"
           :risks-filtered="result.risks_filtered || 0"
-          :changes="result.changes"
+          :pending="pending.risks"
+          :changes="result.changes || {}"
         />
         <SuggestionsSection
-          :suggestions="result.suggestions || []"
+          :suggestions="result.suggestions ?? null"
           :suggestions-error="result.suggestions_error || ''"
-          :changes="result.changes"
+          :pending="pending.suggestions"
+          :changes="result.changes || {}"
         />
       </section>
 

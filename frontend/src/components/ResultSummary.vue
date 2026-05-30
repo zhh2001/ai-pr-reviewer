@@ -4,9 +4,16 @@ import { severityCounts } from '../severity.js'
 
 const props = defineProps({
   result: { type: Object, required: true },
+  pending: {
+    type: Object,
+    default: () => ({ summary: false, risks: false, suggestions: false }),
+  },
 })
 
 const counts = computed(() => severityCounts(props.result?.risks || []))
+const risksArrived = computed(() => Array.isArray(props.result?.risks) || !!props.result?.risks_error)
+const sugArrived = computed(() => Array.isArray(props.result?.suggestions) || !!props.result?.suggestions_error)
+
 const risksTotal = computed(() => (props.result?.risks || []).length)
 const sugTotal = computed(() => (props.result?.suggestions || []).length)
 const filesTotal = computed(() => (props.result?.changes?.files || []).length)
@@ -26,9 +33,17 @@ function pl(n, w) { return n === 1 ? w : w + 's' }
 <template>
   <section class="row">
     <div class="counts">
-      <span class="num"><strong>{{ risksTotal }}</strong> {{ pl(risksTotal, 'risk') }}</span>
+      <span class="num">
+        <strong v-if="risksArrived">{{ risksTotal }}</strong>
+        <strong v-else class="pend">—</strong>
+        {{ pl(risksTotal, 'risk') }}
+      </span>
       <span class="sep">·</span>
-      <span class="num"><strong>{{ sugTotal }}</strong> {{ pl(sugTotal, 'suggestion') }}</span>
+      <span class="num">
+        <strong v-if="sugArrived">{{ sugTotal }}</strong>
+        <strong v-else class="pend">—</strong>
+        {{ pl(sugTotal, 'suggestion') }}
+      </span>
       <span class="sep">·</span>
       <span class="num"><strong>{{ filesTotal }}</strong> {{ pl(filesTotal, 'file') }}</span>
       <span v-if="filtered > 0" class="filtered">
@@ -37,7 +52,7 @@ function pl(n, w) { return n === 1 ? w : w + 's' }
       </span>
     </div>
     <div
-      v-if="distTotal > 0"
+      v-if="risksArrived && distTotal > 0"
       class="dist"
       :title="`high ${counts.high} · medium ${counts.medium} · low ${counts.low}` + (counts.unknown ? ` · unknown ${counts.unknown}` : '')"
     >
@@ -73,6 +88,10 @@ function pl(n, w) { return n === 1 ? w : w + 's' }
   color: var(--fg);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+.counts .num strong.pend {
+  color: var(--fg-muted);
+  opacity: 0.7;
 }
 .counts .sep { color: var(--border); }
 .filtered { color: var(--fg-muted); }

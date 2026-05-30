@@ -1,10 +1,12 @@
 <script setup>
 import { computed } from 'vue'
 import { renderMarkdown } from '../lib/markdown.js'
+import Skeleton from './Skeleton.vue'
 
 const props = defineProps({
   summary: { type: String, default: '' },
   summaryError: { type: String, default: '' },
+  pending: { type: Boolean, default: false },
 })
 
 const html = computed(() => renderMarkdown(props.summary || ''))
@@ -17,6 +19,7 @@ const html = computed(() => renderMarkdown(props.summary || ''))
       本节分析暂时失败：{{ summaryError }}
     </p>
     <div v-else-if="summary" class="md" v-html="html"></div>
+    <Skeleton v-else-if="pending" kind="summary" />
     <p v-else class="empty">No summary returned.</p>
   </section>
 </template>
