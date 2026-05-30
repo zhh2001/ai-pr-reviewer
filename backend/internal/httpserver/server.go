@@ -36,6 +36,7 @@ func newMux(fetcher pr.Fetcher, a *analyzer.Analyzer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.Handle("POST /api/review", reviewHandler(fetcher, a))
+	mux.Handle("POST /api/review/stream", streamHandler(fetcher, a))
 	return mux
 }
 
