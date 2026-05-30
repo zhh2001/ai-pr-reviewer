@@ -224,6 +224,129 @@ func TestAnalyze_DetectorErrorDoesNotFilter(t *testing.T) {
 	}
 }
 
+// AnalyzeStream：三个子任务各推一个 Event 到 channel；全部完成后 channel 关闭。
+func TestAnalyzeStream_AllOK(t *testing.T) {
+	a := analyzer.New(
+		okSummarizer("hi"),
+		okDetector([]pr.Risk{{File: "a.go", Severity: "high", Confidence: 0.9}}),
+		okGenerator([]pr.Suggestion{{File: "a.go", Category: "naming"}}),
+		2*time.Second,
+		0.5,
+	)
+	ch := a.AnalyzeStream(context.Background(), &pr.PRChanges{Owner: "o", Repo: "r", Number: 1})
+
+	got := map[analyzer.EventKind]analyzer.Event{}
+	for ev := range ch {
+		if _, dup := got[ev.Kind]; dup {
+			t.Fatalf("duplicate event for kind %q", ev.Kind)
+		}
+		got[ev.Kind] = ev
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d events, want 3: %+v", len(got), got)
+	}
+	if e := got[analyzer.EventSummary]; e.Err != nil || e.Summary != "hi" {
+		t.Errorf("summary event: %+v", e)
+	}
+	if e := got[analyzer.EventRisks]; e.Err != nil || len(e.Risks) != 1 || e.RisksFiltered != 0 {
+		t.Errorf("risks event: %+v", e)
+	}
+	if e := got[analyzer.EventSuggestions]; e.Err != nil || len(e.Suggestions) != 1 {
+		t.Errorf("suggestions event: %+v", e)
+	}
+}
+
+// AnalyzeStream：detector 报错只让 risks 事件带 Err，其它两条仍正常推出。
+func TestAnalyzeStream_DetectorErrorIsolated(t *testing.T) {
+	a := analyzer.New(
+		okSummarizer("sum"),
+		funcDetector(func(context.Context, *pr.PRChanges) ([]pr.Risk, error) {
+			return nil, errors.New("risk-down")
+		}),
+		okGenerator([]pr.Suggestion{{File: "a.go"}}),
+		2*time.Second,
+		0.5,
+	)
+	ch := a.AnalyzeStream(context.Background(), &pr.PRChanges{Owner: "o", Repo: "r", Number: 1})
+
+	events := map[analyzer.EventKind]analyzer.Event{}
+	for ev := range ch {
+		events[ev.Kind] = ev
+	}
+	if len(events) != 3 {
+		t.Fatalf("want 3 events, got %d", len(events))
+	}
+	if e := events[analyzer.EventRisks]; e.Err == nil || e.Err.Error() != "risk-down" {
+		t.Errorf("risks event should carry detector error, got %+v", e)
+	}
+	if e := events[analyzer.EventSummary]; e.Err != nil || e.Summary != "sum" {
+		t.Errorf("summary should be unaffected, got %+v", e)
+	}
+	if e := events[analyzer.EventSuggestions]; e.Err != nil || len(e.Suggestions) != 1 {
+		t.Errorf("suggestions should be unaffected, got %+v", e)
+	}
+}
+
+// AnalyzeStream：risks 事件应带过滤计数。
+func TestAnalyzeStream_RisksFilteredCount(t *testing.T) {
+	mixed := []pr.Risk{
+		{File: "a.go", Confidence: 0.9},
+		{File: "b.go", Confidence: 0.2},
+		{File: "c.go", Confidence: 0.6},
+		{File: "d.go", Confidence: 0.1},
+	}
+	a := analyzer.New(
+		okSummarizer("sum"),
+		okDetector(mixed),
+		okGenerator([]pr.Suggestion{}),
+		2*time.Second,
+		0.5,
+	)
+	ch := a.AnalyzeStream(context.Background(), &pr.PRChanges{})
+
+	var risksEv analyzer.Event
+	for ev := range ch {
+		if ev.Kind == analyzer.EventRisks {
+			risksEv = ev
+		}
+	}
+	if len(risksEv.Risks) != 2 {
+		t.Errorf("kept = %d, want 2: %+v", len(risksEv.Risks), risksEv.Risks)
+	}
+	if risksEv.RisksFiltered != 2 {
+		t.Errorf("RisksFiltered = %d, want 2", risksEv.RisksFiltered)
+	}
+}
+
+// AnalyzeStream：channel 必须在三条事件都发完后关闭，不能提前也不能挂着。
+func TestAnalyzeStream_ChannelClosesAfterAllEvents(t *testing.T) {
+	a := analyzer.New(
+		okSummarizer("s"),
+		okDetector([]pr.Risk{}),
+		okGenerator([]pr.Suggestion{}),
+		2*time.Second,
+		0.0,
+	)
+	ch := a.AnalyzeStream(context.Background(), &pr.PRChanges{})
+
+	done := make(chan struct{})
+	go func() {
+		count := 0
+		for range ch {
+			count++
+		}
+		if count != 3 {
+			t.Errorf("received %d events before close, want 3", count)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("channel did not close — AnalyzeStream did not finish")
+	}
+}
+
 // 整体超时会让仍在等的子任务用 ctx.Err() 返回，所有通道走 *_error 降级。
 func TestAnalyze_TimeoutMarksAllChannels(t *testing.T) {
 	block := func(ctx context.Context) error {
