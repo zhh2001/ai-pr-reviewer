@@ -66,7 +66,7 @@ handler 用三组 mock 注入即可全链路离线测试。
 | `GITHUB_TOKEN` | _(空，匿名)_ | 拉 PR 需要的 GitHub PAT，建议带 repo 读权限；匿名时撞 60 req/h 主限流。 |
 | `DEEPSEEK_API_KEY` | _(空)_ | DeepSeek API key。空会让三个 LLM 通道都 401，但 fetch / handler 仍正常返回 `changes` 与三条 `*_error`。 |
 | `ADDR` | `:8080` | 后端监听地址。 |
-| `ANALYZE_TIMEOUT_SECONDS` | `90` | summary / risks / suggestions 并发跑共享的整体超时。非法 / 非正数回落默认。 |
+| `ANALYZE_TIMEOUT_SECONDS` | `180` | summary / risks / suggestions 并发跑共享的整体超时。非法 / 非正数回落默认。 |
 | `RISK_CONFIDENCE_THRESHOLD` | `0.5` | risks 通道后置过滤阈值，`[0, 1]`。越界自动夹紧，非法回落默认。 |
 
 复制 `.env.example` 为 `.env` 填写。密钥只走环境变量，别写进代码。

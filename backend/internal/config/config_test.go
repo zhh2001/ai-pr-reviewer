@@ -1,6 +1,17 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+// 把默认超时锁进单元测试，避免未来无意改动。180s 是基于真实 DeepSeek 联调观察
+// 选的值，详见 docs/DESIGN.md 第 5 节。
+func TestDefaultAnalyzeTimeout(t *testing.T) {
+	if DefaultAnalyzeTimeout != 180*time.Second {
+		t.Errorf("DefaultAnalyzeTimeout = %v, want 180s", DefaultAnalyzeTimeout)
+	}
+}
 
 func TestRiskConfidenceThreshold(t *testing.T) {
 	cases := []struct {

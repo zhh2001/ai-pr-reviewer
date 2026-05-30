@@ -178,7 +178,7 @@ rendezvous `sync.WaitGroup` 验证三任务确实并发起来（串行会卡死�
 ### 整体超时
 
 `analyzer.New` 接收 `timeout`（来自 `Config.AnalyzeTimeout`，env
-`ANALYZE_TIMEOUT_SECONDS`，默认 `90s`）。`Analyze` 内部用
+`ANALYZE_TIMEOUT_SECONDS`，默认 `180s`）。`Analyze` 内部用
 `context.WithTimeout(ctx, timeout)` 派生一个共享 ctx 喂给三个 goroutine。
 
 超时**只**触发 ctx 取消，**不**触发任务相互取消——三任务各自的调用收到

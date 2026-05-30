@@ -6,9 +6,11 @@ import (
 	"time"
 )
 
-// DefaultAnalyzeTimeout 是 LLM 分析阶段的兜底超时。90s 覆盖三个并发任务里最慢的
-// 一个调用（含 DeepSeek 偶发慢响应），又不至于让客户端等到天荒地老。
-const DefaultAnalyzeTimeout = 90 * time.Second
+// DefaultAnalyzeTimeout 是 LLM 分析阶段的兜底超时。180s 覆盖三个并发任务里最慢
+// 的一个调用：联调实测 DeepSeek 在大 PR（48KB 上下文）上的 risks 通道经常超过
+// 90s，曾用的 90s 默认会导致 risks 频繁被 ctx 取消、走 risks_error 降级；
+// 提到 180s 把这种"实际能跑完但默认太短"的情形拉回正常路径。
+const DefaultAnalyzeTimeout = 180 * time.Second
 
 // DefaultRiskConfidenceThreshold 是 risks 通道的误报过滤默认阈值。
 // 0.5 偏中性：低于这个值的判断通常更接近"猜测"，剔掉能显著降低误报。
